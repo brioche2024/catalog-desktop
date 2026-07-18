@@ -3,6 +3,7 @@ from typing import Any
 
 import httpx
 from bs4 import BeautifulSoup
+from curl_cffi import requests
 
 from .config import (
     PFS_LOGIN_PAGE_URL,
@@ -65,7 +66,11 @@ def login_pfs(
     timeout = httpx.Timeout(20.0, connect=10.0)
 
     with httpx.Client(follow_redirects=True, timeout=timeout, headers=headers) as client:
-        page = client.get(PFS_LOGIN_PAGE_URL)
+        #page = client.get(PFS_LOGIN_PAGE_URL)
+        page = requests.get(
+            PFS_LOGIN_PAGE_URL,
+            impersonate="chrome131"
+        )
         page.raise_for_status()
 
         session_token = _extract_session_token(page.text)
