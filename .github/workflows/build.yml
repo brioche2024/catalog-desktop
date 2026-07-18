@@ -26,11 +26,22 @@ jobs:
           pip install wheel setuptools pillow
           pip install -r requirements-build.txt
 
-      - name: 4. Lancer votre script de build personnalisé
-        # Ce step exécute directement VOTRE script script/build.py
+      # --- ÉTAPE 4 WINDOWS ---
+      - name: 4a. [Windows] Lancer le script de build
+        if: matrix.os == 'windows-latest'
         run: |
           python scripts/build.py
+        shell: bash
 
+      # --- ÉTAPE 4 MAC INTEL ---
+      - name: 4b. [macOS Intel] Lancer le script de build
+        if: matrix.os == 'macos-latest'
+        run: |
+          # On force PyInstaller à ne compiler que pour l'architecture Intel
+          arch -x86_64 python scripts/build.py
+        shell: bash
+
+      # --- ÉTAPE 5a COMPRESSION WINDOWS ---
       - name: 5a. [Windows] Vérification et compression ZIP
         if: matrix.os == 'windows-latest'
         shell: powershell
@@ -43,15 +54,28 @@ jobs:
               exit 1
           }
 
-      # --- ÉTAPE 5 POUR MAC UNIQUEMENT ---
-      - name: 5b. [macOS] Vérification et compression ZIP
+      # --- ÉTAPE 5b COMPRESSION MAC INTEL & SILICON ---
+      - name: 5b. [macOS] Extraction, Séparation et Compression
         if: matrix.os == 'macos-latest'
         shell: bash
         run: |
           mkdir -p binaires_finaux
-          if [ -d "dist/GestionnaireCatalogue.app" ]; then
+          cd dist
+          
+          if [ -d "GestionnaireCatalogue.app" ]; then
+              # 1. On sauvegarde la version Intel qui vient d'être compilée
+              zip -r ../binaires_finaux/GestionnaireCatalogue-Mac-Intel.zip GestionnaireCatalogue.app
+              
+              # 2. Nettoyage pour la deuxième compilation
+              rm -rf GestionnaireCatalogue.app
+              cd ..
+              
+              # 3. On relance la compilation mais cette fois forcée pour Apple Silicon (ARM64)
+              arch -arm64 python scripts/build.py
+              
+              # 4. On compresse la version Silicon obtenue
               cd dist
-              zip -r ../binaires_finaux/GestionnaireCatalogue-Mac.zip GestionnaireCatalogue.app
+              zip -r ../binaires_finaux/GestionnaireCatalogue-Mac-Silicon.zip GestionnaireCatalogue.app
           else
               echo "Erreur : Application dist/GestionnaireCatalogue.app introuvable !"
               exit 1
