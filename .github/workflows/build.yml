@@ -23,9 +23,8 @@ jobs:
       - name: 3. Installer PyInstaller (nécessaire pour votre script)
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller wheel setuptools pillow
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          if [ -f requirements-build.txt ]; then pip install -r requirements-build.txt; fi
+          pip install wheel setuptools pillow
+          pip install -r requirements-build.txt
 
       - name: 4. Lancer votre script de build personnalisé
         # Ce step exécute directement VOTRE script script/build.py
