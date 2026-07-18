@@ -32,20 +32,28 @@ jobs:
           python scripts/build.py
 
       - name: 5. Zipper l'application générée (Obligatoire pour les dossiers/bundles)
-        shell: bash
         run: |
-          # On crée le dossier final à la racine du projet
-          mkdir -p binaires_finaux
-          
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            # Votre script génère un dossier 'dist/GestionnaireCatalogue' sur Windows
-            cd dist
-            tar -acf ../binaires_finaux/GestionnaireCatalogue-Windows.zip GestionnaireCatalogue
-          else
-            # Votre script génère un bundle 'dist/GestionnaireCatalogue.app' sur Mac
-            cd dist
-            zip -r ../binaires_finaux/GestionnaireCatalogue-Mac.zip GestionnaireCatalogue.app
-          fi
+          # On s'assure que le dossier de sortie existe à la racine
+          # Sur Windows, GitHub Actions utilise PowerShell par défaut, sur Mac c'est Bash
+          if ("${{ matrix.os }}" -eq "windows-latest") {
+              New-Item -ItemType Directory -Force -Path "binaires_finaux"
+              if (Test-Path "dist/GestionnaireCatalogue") {
+                  # Utilisation de la commande native PowerShell de Windows pour un ZIP parfait
+                  Compress-Archive -Path "dist/GestionnaireCatalogue" -DestinationPath "binaires_finaux/GestionnaireCatalogue-Windows.zip" -Force
+              } else {
+                  Write-Error "Erreur : Dossier dist/GestionnaireCatalogue introuvable !"
+                  exit 1
+              }
+          } else {
+              mkdir -p binaires_finaux
+              if [ -d "dist/GestionnaireCatalogue.app" ]; then
+                  cd dist
+                  zip -r ../binaires_finaux/GestionnaireCatalogue-Mac.zip GestionnaireCatalogue.app
+              else
+                  echo "Erreur : Application dist/GestionnaireCatalogue.app introuvable !"
+                  exit 1
+              fi
+          }
 
       - name: 6. Attacher les fichiers ZIP à la Release GitHub
         uses: softprops/action-gh-release@v2
