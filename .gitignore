@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+dist/
+build/
+*.spec
+.session/
+output/
+*.json
+!requirements.txt
