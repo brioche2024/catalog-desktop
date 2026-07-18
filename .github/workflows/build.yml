@@ -33,19 +33,18 @@ jobs:
       - name: 5. Zipper l'application générée (Obligatoire pour les dossiers/bundles)
         shell: bash
         run: |
-          mkdir binaires_finaux
-          cd dist
+          # On crée le dossier final à la racine du projet
+          mkdir -p binaires_finaux
           
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            # Compresse le dossier GestionnaireCatalogue de Windows en .zip
+            # Votre script génère un dossier 'dist/GestionnaireCatalogue' sur Windows
+            cd dist
             tar -acf ../binaires_finaux/GestionnaireCatalogue-Windows.zip GestionnaireCatalogue
           else
-            mv main GestionnaireCatalogue-Mac
-            # On compresse IMMÉDIATEMENT le fichier en ZIP sur le Mac de GitHub
-            zip GestionnaireCatalogue-Mac.zip GestionnaireCatalogue-Mac
-            # On supprime le fichier brut pour ne pas l'envoyer en double
-            rm GestionnaireCatalogue-Mac
-	  fi
+            # Votre script génère un bundle 'dist/GestionnaireCatalogue.app' sur Mac
+            cd dist
+            zip -r ../binaires_finaux/GestionnaireCatalogue-Mac.zip GestionnaireCatalogue.app
+          fi
 
       - name: 6. Attacher les fichiers ZIP à la Release GitHub
         uses: softprops/action-gh-release@v2
