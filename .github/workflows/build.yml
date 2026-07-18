@@ -1,0 +1,52 @@
+name: Compilation Multi-Plateforme
+
+on:
+  release:
+    types: [published] # Le script se déclenche uniquement quand vous publiez une Release sur GitHub
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        # On lance 3 machines virtuelles en parallèle
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: 1. Récupérer le code du dépôt
+        uses: actions/checkout@v4
+
+      - name: 2. Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11' # Changez par votre version de Python si besoin
+
+      - name: 3. Installer les dépendances
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 4. Compiler l'application (PyInstaller)
+        run: |
+          pip install pyinstaller
+          pyinstaller --onefile main.py
+
+      - name: 5. Renommer l'exécutable pour qu'il soit clair
+        shell: bash
+        run: |
+          # Cette étape renomme le fichier pour inclure le nom de l'OS (ex: main-windows.exe)
+          cd dist
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            mv main.exe GestionnaireCatalogue.exe
+          elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+            mv main GestionnaireCatalogue-Mac
+          else
+            mv main GestionnaireCatalogue-Linux
+          fi
+
+      - name: 6. Uploader l'exécutable sur la Release GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
