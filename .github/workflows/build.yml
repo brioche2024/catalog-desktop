@@ -28,7 +28,7 @@ jobs:
       - name: 4. Lancer votre script de build personnalisé
         # Ce step exécute directement VOTRE script script/build.py
         run: |
-          python script/build.py
+          python scripts/build.py
 
       - name: 5. Zipper l'application générée (Obligatoire pour les dossiers/bundles)
         shell: bash
