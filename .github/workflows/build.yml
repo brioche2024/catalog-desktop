@@ -2,14 +2,13 @@ name: Compilation Multi-Plateforme
 
 on:
   release:
-    types: [published] # Le script se déclenche uniquement quand vous publiez une Release sur GitHub
+    types: [published]
 
 jobs:
   build:
     strategy:
       matrix:
-        # On lance 3 machines virtuelles en parallèle
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -19,34 +18,39 @@ jobs:
       - name: 2. Installer Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11' # Changez par votre version de Python si besoin
+          python-version: '3.11'
 
-      - name: 3. Installer les dépendances
+      - name: 3. Installer PyInstaller (nécessaire pour votre script)
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: 4. Compiler l'application (PyInstaller)
-        run: |
           pip install pyinstaller
-          pyinstaller --onefile main.py
 
-      - name: 5. Renommer l'exécutable pour qu'il soit clair
+      - name: 4. Lancer votre script de build personnalisé
+        # Ce step exécute directement VOTRE script script/build.py
+        run: |
+          python script/build.py
+
+      - name: 5. Zipper l'application générée (Obligatoire pour les dossiers/bundles)
         shell: bash
         run: |
-          # Cette étape renomme le fichier pour inclure le nom de l'OS (ex: main-windows.exe)
+          mkdir binaires_finaux
           cd dist
+          
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            mv main.exe GestionnaireCatalogue.exe
-          elif [ "${{ matrix.os }}" = "macos-latest" ]; then
-            mv main GestionnaireCatalogue-Mac
+            # Compresse le dossier GestionnaireCatalogue de Windows en .zip
+            tar -acf ../binaires_finaux/GestionnaireCatalogue-Windows.zip GestionnaireCatalogue
           else
-            mv main GestionnaireCatalogue-Linux
-          fi
+            mv main GestionnaireCatalogue-Mac
+            # On compresse IMMÉDIATEMENT le fichier en ZIP sur le Mac de GitHub
+            zip GestionnaireCatalogue-Mac.zip GestionnaireCatalogue-Mac
+            # On supprime le fichier brut pour ne pas l'envoyer en double
+            rm GestionnaireCatalogue-Mac
+	  fi
 
-      - name: 6. Uploader l'exécutable sur la Release GitHub
+      - name: 6. Attacher les fichiers ZIP à la Release GitHub
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          # On envoie le zip final créé à l'étape précédente
+          files: binaires_finaux/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
