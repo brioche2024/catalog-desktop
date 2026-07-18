@@ -31,29 +31,31 @@ jobs:
         run: |
           python scripts/build.py
 
-      - name: 5. Zipper l'application générée (Obligatoire pour les dossiers/bundles)
+      - name: 5a. [Windows] Vérification et compression ZIP
+        if: matrix.os == 'windows-latest'
+        shell: powershell
         run: |
-          # On s'assure que le dossier de sortie existe à la racine
-          # Sur Windows, GitHub Actions utilise PowerShell par défaut, sur Mac c'est Bash
-          if ("${{ matrix.os }}" -eq "windows-latest") {
-              New-Item -ItemType Directory -Force -Path "binaires_finaux"
-              if (Test-Path "dist/GestionnaireCatalogue") {
-                  # Utilisation de la commande native PowerShell de Windows pour un ZIP parfait
-                  Compress-Archive -Path "dist/GestionnaireCatalogue" -DestinationPath "binaires_finaux/GestionnaireCatalogue-Windows.zip" -Force
-              } else {
-                  Write-Error "Erreur : Dossier dist/GestionnaireCatalogue introuvable !"
-                  exit 1
-              }
+          New-Item -ItemType Directory -Force -Path "binaires_finaux"
+          if (Test-Path "dist/GestionnaireCatalogue") {
+              Compress-Archive -Path "dist/GestionnaireCatalogue" -DestinationPath "binaires_finaux/GestionnaireCatalogue-Windows.zip" -Force
           } else {
-              mkdir -p binaires_finaux
-              if [ -d "dist/GestionnaireCatalogue.app" ]; then
-                  cd dist
-                  zip -r ../binaires_finaux/GestionnaireCatalogue-Mac.zip GestionnaireCatalogue.app
-              else
-                  echo "Erreur : Application dist/GestionnaireCatalogue.app introuvable !"
-                  exit 1
-              fi
+              Write-Error "Erreur : Dossier dist/GestionnaireCatalogue introuvable !"
+              exit 1
           }
+
+      # --- ÉTAPE 5 POUR MAC UNIQUEMENT ---
+      - name: 5b. [macOS] Vérification et compression ZIP
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          mkdir -p binaires_finaux
+          if [ -d "dist/GestionnaireCatalogue.app" ]; then
+              cd dist
+              zip -r ../binaires_finaux/GestionnaireCatalogue-Mac.zip GestionnaireCatalogue.app
+          else
+              echo "Erreur : Application dist/GestionnaireCatalogue.app introuvable !"
+              exit 1
+          fi
 
       - name: 6. Attacher les fichiers ZIP à la Release GitHub
         uses: softprops/action-gh-release@v2
