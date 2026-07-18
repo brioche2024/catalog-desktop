@@ -52,10 +52,9 @@ jobs:
           cd dist
           
           if [ -d "GestionnaireCatalogue.app" ]; then
-              cd dist
               zip -r ../binaires_finaux/GestionnaireCatalogue-Mac.zip GestionnaireCatalogue.app
           else
-              echo "Erreur : Application dist/GestionnaireCatalogue.app introuvable !"
+              echo "Erreur : Application GestionnaireCatalogue.app introuvable !"
               exit 1
           fi
 
