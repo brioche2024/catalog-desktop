@@ -51,7 +51,7 @@ jobs:
           mkdir -p binaires_finaux
           cd dist
           
-          if [ -d "dist/GestionnaireCatalogue.app" ]; then
+          if [ -d "GestionnaireCatalogue.app" ]; then
               cd dist
               zip -r ../binaires_finaux/GestionnaireCatalogue-Mac.zip GestionnaireCatalogue.app
           else
