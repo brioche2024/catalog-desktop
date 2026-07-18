@@ -1,5 +1,21 @@
-PySide6>=6.8.0
-httpx>=0.28.0
-beautifulsoup4>=4.12.0
-lxml>=5.3.0
-pyobjc-framework-Cocoa>=10.0 ; sys_platform == "darwin"
+altgraph==0.17.5
+anyio==4.14.2
+beautifulsoup4==4.15.0
+certifi==2026.6.17
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.18
+lxml==6.1.1
+macholib==1.16.4
+packaging==26.2
+pyinstaller==6.21.0
+pyinstaller-hooks-contrib==2026.6
+pyobjc-core==12.2.1
+pyobjc-framework-Cocoa==12.2.1 ; sys_platform == "darwin"
+PySide6==6.11.1
+PySide6_Addons==6.11.1
+PySide6_Essentials==6.11.1
+shiboken6==6.11.1
+soupsieve==2.8.4
+typing_extensions==4.16.0
