@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-import httpx
+from curl_cffi import CurlMime
 
 from .config import EFASHION_API_URL, EFASHION_REST_BASE_URL, USER_AGENT
+from .http_client import create_http_session
 from .session_store import EfashionSession
 
 
@@ -27,10 +28,10 @@ def _auth_headers(session: EfashionSession, *, json_content: bool = True) -> dic
 class EfashionClient:
     def __init__(self, session: EfashionSession) -> None:
         self.session = session
-        self._client = httpx.Client(
+        self._client = create_http_session(
             timeout=120.0,
             headers=_auth_headers(session, json_content=False),
-            follow_redirects=True,
+            allow_redirects=True,
         )
 
     def close(self) -> None:
@@ -347,15 +348,25 @@ class EfashionClient:
             raise EfashionApiError("Aucun fichier photo à uploader.")
 
         url = f"{EFASHION_REST_BASE_URL.rstrip('/')}/api/upload-product-photo"
-        multipart = [
-            ("photos", (filename, content, content_type or "image/jpeg"))
-            for filename, content, content_type in files
-        ]
-        response = self._client.post(
-            url,
-            data={"productId": str(product_id)},
-            files=multipart,
+        mp = CurlMime.from_list(
+            [
+                {
+                    "name": "photos",
+                    "content_type": content_type or "image/jpeg",
+                    "filename": filename,
+                    "data": content,
+                }
+                for filename, content, content_type in files
+            ]
         )
+        try:
+            response = self._client.post(
+                url,
+                data={"productId": str(product_id)},
+                multipart=mp,
+            )
+        finally:
+            mp.close()
 
         if response.status_code == 401:
             raise EfashionApiError(

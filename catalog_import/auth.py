@@ -1,9 +1,8 @@
 import re
 from typing import Any
 
-import httpx
 from bs4 import BeautifulSoup
-from curl_cffi import requests
+from curl_cffi.requests import Response
 
 from .config import (
     PFS_LOGIN_PAGE_URL,
@@ -11,6 +10,7 @@ from .config import (
     PFS_SITE_ORIGIN,
     USER_AGENT,
 )
+from .http_client import create_http_session
 from .session_store import AppSession, PfsSession, SessionStore
 
 
@@ -29,7 +29,7 @@ def _extract_session_token(html: str) -> str:
     return "marketplace"
 
 
-def _parse_oauth_error(response: httpx.Response) -> str:
+def _parse_oauth_error(response: Response) -> str:
     try:
         payload = response.json()
         if isinstance(payload, dict):
@@ -63,14 +63,12 @@ def login_pfs(
         "User-Agent": USER_AGENT,
         "Accept": "application/json, text/plain, */*",
     }
-    timeout = httpx.Timeout(20.0, connect=10.0)
-
-    with httpx.Client(follow_redirects=True, timeout=timeout, headers=headers) as client:
-        #page = client.get(PFS_LOGIN_PAGE_URL)
-        page = requests.get(
-            PFS_LOGIN_PAGE_URL,
-            impersonate="chrome131"
-        )
+    with create_http_session(
+        headers=headers,
+        timeout=(10.0, 20.0),
+        allow_redirects=True,
+    ) as client:
+        page = client.get(PFS_LOGIN_PAGE_URL)
         page.raise_for_status()
 
         session_token = _extract_session_token(page.text)
@@ -85,7 +83,7 @@ def login_pfs(
                 "Referer": PFS_LOGIN_PAGE_URL,
                 "Origin": PFS_SITE_ORIGIN,
             },
-            follow_redirects=False,
+            allow_redirects=False,
         )
 
         if oauth.status_code in {301, 302, 303, 307, 308}:
