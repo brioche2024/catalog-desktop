@@ -82,7 +82,7 @@ def download_image(url: str) -> tuple[bytes, str, str]:
     ) as client:
         response = client.get(full_url)
     if response.status_code >= 400:
-        raise EfashionApiError(f"Téléchargement photo PFS impossible ({response.status_code}).")
+        raise EfashionApiError(f"Téléchargement photo source impossible ({response.status_code}).")
     content_type = (response.headers.get("content-type") or "image/jpeg").split(";")[0].strip()
     ext = _guess_extension(content_type, full_url)
     filename = f"pfs{ext}"
@@ -220,7 +220,7 @@ def upload_pfs_photos_to_efashion(
             continue
         groups = product_images_by_color(product)
         if not groups:
-            errors.append(f"{reference} : aucune photo PFS.")
+            errors.append(f"{reference} : aucune photo source.")
             continue
 
         for color_label, urls in groups:

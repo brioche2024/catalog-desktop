@@ -28,7 +28,7 @@ def update_products_on_efashion(
         if on_progress:
             on_progress(done, steps, message)
 
-    progress(0, f"Enrichissement PFS de {total} produit(s)…")
+    progress(0, f"Enrichissement de {total} produit(s)…")
     _enrich_selected_products(
         pfs_session,
         products,

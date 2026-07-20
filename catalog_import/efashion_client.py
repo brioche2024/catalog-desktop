@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from curl_cffi import CurlMime
 
@@ -124,6 +124,7 @@ class EfashionClient:
         references: list[dict[str, str]],
         *,
         chunk_size: int = 80,
+        on_progress: Callable[[int, int], None] | None = None,
     ) -> dict[str, bool]:
         """Retourne {reference: True/False}. Sans venduPar = doublon strict sur la ref."""
         found: dict[str, bool] = {}
@@ -138,6 +139,11 @@ class EfashionClient:
         if not clean:
             return found
 
+        total = len(clean)
+        if on_progress:
+            on_progress(0, total)
+
+        checked = 0
         for offset in range(0, len(clean), chunk_size):
             chunk = clean[offset : offset + chunk_size]
             body = self.post_rest(
@@ -159,6 +165,9 @@ class EfashionClient:
                             exists = bool(item.get("exists"))
                             break
                 found[reference] = exists
+            checked += len(chunk)
+            if on_progress:
+                on_progress(checked, total)
         return found
 
     def find_main_product_by_reference(self, reference: str) -> dict[str, Any] | None:

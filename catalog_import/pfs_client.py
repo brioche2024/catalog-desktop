@@ -59,13 +59,13 @@ def _get_with_retries(
             last_response = response
         except NETWORK_ERRORS as exc:
             if attempt + 1 >= max_retries:
-                raise PfsApiError(f"API PFS injoignable : {exc}") from exc
+                raise PfsApiError(f"API compte source injoignable : {exc}") from exc
             time.sleep(delay)
             delay = min(delay * 2, 10.0)
             continue
 
         if response.status_code == 401:
-            raise PfsApiError("Session PFS expirée ou non autorisée. Reconnectez-vous.")
+            raise PfsApiError("Session compte source expirée ou non autorisée. Reconnectez-vous.")
         if response.status_code in _RETRYABLE_STATUS and attempt + 1 < max_retries:
             time.sleep(_retry_delay(response, delay))
             delay = min(delay * 2, 10.0)
@@ -608,7 +608,7 @@ def format_product_details(product: dict[str, Any]) -> str:
         f"Stock total : {row[11]}",
         f"Variantes : {row[12]}",
         f"Statut : {row[13]}",
-        f"ID PFS : {_first_str(product, 'id')}",
+        f"ID source : {_first_str(product, 'id')}",
         f"Date création : {format_creation_date(product) or '—'}",
     ]
 
@@ -786,16 +786,16 @@ class PfsClient:
         if response.status_code >= 400:
             detail = response.text[:300]
             raise PfsApiError(
-                f"Erreur API PFS (HTTP {response.status_code}) : {detail}"
+                f"Erreur API compte source (HTTP {response.status_code}) : {detail}"
             )
 
         try:
             payload = response.json()
         except ValueError as exc:
-            raise PfsApiError("Réponse API PFS invalide (JSON attendu).") from exc
+            raise PfsApiError("Réponse API compte source invalide (JSON attendu).") from exc
 
         if not isinstance(payload, dict):
-            raise PfsApiError("Réponse API PFS inattendue.")
+            raise PfsApiError("Réponse API compte source inattendue.")
 
         return payload
 
@@ -818,16 +818,16 @@ class PfsClient:
         if response.status_code >= 400:
             detail = response.text[:300]
             raise PfsApiError(
-                f"Erreur API PFS (HTTP {response.status_code}) : {detail}"
+                f"Erreur API compte source (HTTP {response.status_code}) : {detail}"
             )
 
         try:
             payload = response.json()
         except ValueError as exc:
-            raise PfsApiError("Réponse API PFS invalide (JSON attendu).") from exc
+            raise PfsApiError("Réponse API compte source invalide (JSON attendu).") from exc
 
         if not isinstance(payload, dict):
-            raise PfsApiError("Réponse API PFS inattendue.")
+            raise PfsApiError("Réponse API compte source inattendue.")
 
         return payload
 

@@ -69,7 +69,7 @@ def _enrich_selected_products(
         sample = ", ".join(incomplete[:6])
         more = f" (+{len(incomplete) - 6})" if len(incomplete) > 6 else ""
         raise MelSyncError(
-            "Impossible d'enrichir certains produits PFS avant l'envoi : "
+            "Impossible d'enrichir certains produits source avant l'envoi : "
             f"{sample}{more}."
         )
 
@@ -92,7 +92,7 @@ def send_products_to_efashion(
     def enrich_progress(done: int, enrich_total: int, message: str) -> None:
         progress(done, message, total_steps=base_steps + enrich_total + total)
 
-    progress(0, f"Enrichissement PFS de {total} produit(s) sélectionné(s)…")
+    progress(0, f"Enrichissement de {total} produit(s) sélectionné(s)…")
     _enrich_selected_products(pfs_session, products, on_progress=enrich_progress)
 
     try:
@@ -102,7 +102,7 @@ def send_products_to_efashion(
             mapping_store = CategoryMappingStore(id_vendeur=client.session.id_vendeur)
             mapper = MelMapper(client, reference_data, category_mapping=mapping_store)
 
-            progress(2, f"Mapping PFS → MEL de {total} produit(s)…")
+            progress(2, f"Mapping source → MEL de {total} produit(s)…")
             mel_references = mapper.map_products(products)
 
             progress(3, "Création des fiches MEL…")
@@ -125,7 +125,7 @@ def send_products_to_efashion(
                 "errors": [],
             }
             if shooting_ids:
-                progress(5, "Upload photos PFS → S3 EFashion (resize serveur)…")
+                progress(5, "Upload photos → S3 EFashion (resize serveur)…")
 
                 def photo_progress(done: int, photo_total: int, message: str) -> None:
                     progress(
