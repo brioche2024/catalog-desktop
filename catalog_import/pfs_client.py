@@ -4,7 +4,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
-import httpx
+from curl_cffi.requests import Response, Session
 
 from .config import (
     DEFAULT_ENRICH_CONCURRENCY,
@@ -19,6 +19,7 @@ from .config import (
     PFS_PRODUCT_VARIANTS_URL,
     USER_AGENT,
 )
+from .http_client import NETWORK_ERRORS, create_http_session
 from .session_store import PfsSession
 
 
@@ -29,7 +30,7 @@ class PfsApiError(Exception):
 _RETRYABLE_STATUS = {429, 502, 503, 504}
 
 
-def _retry_delay(response: httpx.Response | None, delay: float) -> float:
+def _retry_delay(response: Response | None, delay: float) -> float:
     if response is None:
         return delay
     retry_after = response.headers.get("Retry-After")
@@ -42,21 +43,21 @@ def _retry_delay(response: httpx.Response | None, delay: float) -> float:
 
 
 def _get_with_retries(
-    client: httpx.Client,
+    client: Session,
     url: str,
     *,
     params: dict[str, Any] | None = None,
     max_retries: int = DEFAULT_FETCH_RETRIES,
     initial_delay: float = DEFAULT_FETCH_RETRY_DELAY,
-) -> httpx.Response:
+) -> Response:
     delay = initial_delay
-    last_response: httpx.Response | None = None
+    last_response: Response | None = None
 
     for attempt in range(max_retries):
         try:
             response = client.get(url, params=params)
             last_response = response
-        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+        except NETWORK_ERRORS as exc:
             if attempt + 1 >= max_retries:
                 raise PfsApiError(f"API PFS injoignable : {exc}") from exc
             time.sleep(delay)
@@ -138,7 +139,7 @@ def _extract_list_data(payload: Any) -> list[dict[str, Any]] | None:
 
 def _fetch_json(access_token: str, url: str) -> Any | None:
     headers = _auth_headers(access_token)
-    with httpx.Client(timeout=60.0, headers=headers) as client:
+    with create_http_session(timeout=60.0, headers=headers) as client:
         response = _get_with_retries(client, url)
 
     if response.status_code >= 400:
@@ -748,7 +749,7 @@ def has_more_pages(pagination: dict[str, int], page: int, batch_size: int) -> bo
 class PfsClient:
     def __init__(self, session: PfsSession) -> None:
         self.session = session
-        self._client = httpx.Client(
+        self._client = create_http_session(
             timeout=60.0,
             headers={
                 "User-Agent": USER_AGENT,

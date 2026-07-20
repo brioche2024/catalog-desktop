@@ -5,9 +5,8 @@ import unicodedata
 from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
 
-import httpx
-
 from .config import USER_AGENT
+from .http_client import create_http_session
 from .efashion_client import EfashionApiError, EfashionClient
 from .mel_mapper import PFS_COLOR_ALIASES
 from .pfs_client import product_images_by_color
@@ -76,7 +75,11 @@ def _guess_extension(content_type: str, url: str) -> str:
 
 def download_image(url: str) -> tuple[bytes, str, str]:
     full_url = _full_quality_url(url)
-    with httpx.Client(timeout=60.0, headers={"User-Agent": USER_AGENT}, follow_redirects=True) as client:
+    with create_http_session(
+        timeout=60.0,
+        headers={"User-Agent": USER_AGENT},
+        allow_redirects=True,
+    ) as client:
         response = client.get(full_url)
     if response.status_code >= 400:
         raise EfashionApiError(f"Téléchargement photo PFS impossible ({response.status_code}).")

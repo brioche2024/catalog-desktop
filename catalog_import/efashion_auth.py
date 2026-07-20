@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-import httpx
-
 from .config import EFASHION_API_URL
+from .http_client import create_http_session
 from .session_store import AppSession, EfashionSession, SessionStore
 
 
@@ -43,9 +42,7 @@ def login_efashion(
     store: SessionStore,
     existing: AppSession,
 ) -> EfashionSession:
-    timeout = httpx.Timeout(20.0, connect=10.0)
-
-    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+    with create_http_session(timeout=(10.0, 20.0), allow_redirects=True) as client:
         response = client.post(
             EFASHION_API_URL,
             json={
