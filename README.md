@@ -25,8 +25,8 @@ python main.py
 
 ## Utilisation
 
-1. **Connexion PFS** — email et mot de passe du compte vendeur Paris Fashion Shops
-2. **Connexion EFashion** — email et mot de passe du compte vendeur EFashion Paris (obligatoire)
+1. **Connexion PFS** — email et mot de passe du compte vendeur 
+2. **Connexion EFashion** — email et mot de passe du compte vendeur
 3. **Liste produits** — `listProducts` + `listVariants` + détail `/products/{id}`
 4. **Exporter JSON** — sauvegarde les produits enrichis + réponses API brutes
 
@@ -57,7 +57,7 @@ catalog-desktop/
 ├── requirements.txt
 ├── scripts/build.py
 └── catalog_import/
-    ├── auth.py              # Login PFS (OAuth)
+    ├── auth.py              # Login  (OAuth)
     ├── efashion_auth.py     # Placeholder EFashion
     ├── pfs_client.py        # Client API listProducts + products/{id}
     ├── product_service.py   # Fetch + export JSON

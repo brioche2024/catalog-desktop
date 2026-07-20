@@ -66,7 +66,7 @@ class ClickableLabel(QLabel):
 
 
 class CategoryMappingDialog(QDialog):
-    """Popup L1 → L2 → L3 pour une catégorie PFS inconnue."""
+    """Popup L1 → L2 → L3 pour une catégorie source inconnue."""
 
     def __init__(
         self,
@@ -94,7 +94,7 @@ class CategoryMappingDialog(QDialog):
         layout.setSpacing(12)
 
         info = QLabel(
-            f"Catégorie PFS « {pfs_label} »"
+            f"Catégorie source « {pfs_label} »"
             + (f" ({gender})" if gender and gender != "*" else "")
             + "\nn’a pas encore de feuille EFashion associée.\n"
             "Choisissez la catégorie L1 → L2 → L3."
@@ -229,7 +229,7 @@ class Worker(QObject):
                     self.store,
                     self.app_session,
                 )
-                self.log.emit(f"PFS connecté : {pfs.email}")
+                self.log.emit(f"Compte source connecté : {pfs.email}")
                 self.pfs_login_done.emit()
 
             elif self.task == "efashion_login":
@@ -254,7 +254,9 @@ class Worker(QObject):
                     on_progress=on_progress,
                 )
                 if not products:
-                    raise PfsApiError("Aucun produit actif trouvé sur votre compte PFS.")
+                    raise PfsApiError(
+                        "Aucun produit actif trouvé sur votre compte source."
+                    )
                 self.products_ready.emit(products, raw_pages, raw_variant_pages)
 
             elif self.task == "check_existing_refs":
@@ -268,16 +270,27 @@ class Worker(QObject):
                     seen.add(reference)
                     refs_payload.append({"reference": reference})
 
-                self.progress.emit(
-                    0, max(len(refs_payload), 1), "Vérification des doublons catalogue…"
-                )
+                total_refs = max(len(refs_payload), 1)
+
+                def on_dup_progress(checked: int, total: int) -> None:
+                    self.progress.emit(
+                        checked,
+                        max(total, 1),
+                        f"Vérification des doublons : {checked}/{total} référence(s)…",
+                    )
+
                 with EfashionClient(self.app_session.efashion) as client:
-                    results = client.check_references_exists_batch(refs_payload)
+                    results = client.check_references_exists_batch(
+                        refs_payload,
+                        on_progress=on_dup_progress,
+                    )
                 existing = {
                     reference for reference, exists in results.items() if exists
                 }
                 self.progress.emit(
-                    1, 1, f"{len(existing)} référence(s) déjà présentes."
+                    total_refs,
+                    total_refs,
+                    f"Vérification terminée — {len(existing)} référence(s) déjà présentes.",
                 )
                 self.existing_refs_ready.emit(existing)
 
@@ -512,13 +525,13 @@ class CatalogDesktopApp(QMainWindow):
         step.setAlignment(Qt.AlignCenter)
         layout.addWidget(step)
 
-        title = QLabel("Connexion vendeur PFS")
+        title = QLabel("Connexion compte source")
         title.setProperty("class", "title")
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
 
         subtitle = QLabel(
-            "Connectez-vous avec votre compte vendeur Paris Fashion Shops."
+            "Connectez-vous avec les identifiants de votre compte source."
         )
         subtitle.setProperty("class", "subtitle")
         subtitle.setAlignment(Qt.AlignCenter)
@@ -526,15 +539,15 @@ class CatalogDesktopApp(QMainWindow):
         layout.addWidget(subtitle)
 
         self.pfs_email_input = QLineEdit()
-        self.pfs_email_input.setPlaceholderText("Email PFS")
+        self.pfs_email_input.setPlaceholderText("Email compte source")
         layout.addWidget(self.pfs_email_input)
 
         self.pfs_password_input = QLineEdit()
-        self.pfs_password_input.setPlaceholderText("Mot de passe PFS")
+        self.pfs_password_input.setPlaceholderText("Mot de passe compte source")
         self.pfs_password_input.setEchoMode(QLineEdit.Password)
         layout.addWidget(self.pfs_password_input)
 
-        self.pfs_login_button = QPushButton("Se connecter à PFS")
+        self.pfs_login_button = QPushButton("Se connecter au compte source")
         self.pfs_login_button.setProperty("class", "primary")
         self.pfs_login_button.clicked.connect(self._on_pfs_login)
         layout.addWidget(self.pfs_login_button)
@@ -546,7 +559,9 @@ class CatalogDesktopApp(QMainWindow):
 
         if self.app_session and self.app_session.pfs:
             self.pfs_email_input.setText(self.app_session.pfs.email)
-            self.pfs_login_status.setText(f"Session PFS : {self.app_session.pfs.email}")
+            self.pfs_login_status.setText(
+                f"Compte source : {self.app_session.pfs.email}"
+            )
             self.pfs_login_status.setStyleSheet("color: #15803d;")
 
         outer.addWidget(card, alignment=Qt.AlignCenter)
@@ -812,7 +827,7 @@ class CatalogDesktopApp(QMainWindow):
 
         self.stack.setCurrentWidget(self.main_page)
         self._update_status_label()
-        self._append_log(f"Session PFS active : {self.app_session.pfs.email}")
+        self._append_log(f"Compte source actif : {self.app_session.pfs.email}")
         self._auto_fetch_products_if_needed()
 
     def _auto_fetch_products_if_needed(self) -> None:
@@ -823,7 +838,7 @@ class CatalogDesktopApp(QMainWindow):
         if not self.app_session or not self.app_session.pfs:
             return
 
-        self.summary_label.setText("Récupération de vos produits PFS…")
+        self.summary_label.setText("Récupération de vos produits…")
         self.progress_bar.setValue(0)
         self._append_log(
             "Chargement rapide : listProducts + listVariants "
@@ -836,7 +851,7 @@ class CatalogDesktopApp(QMainWindow):
             self.status_label.setText("Non connecté.")
             return
 
-        lines = [f"PFS : {self.app_session.pfs.email}"]
+        lines = [f"Source : {self.app_session.pfs.email}"]
         if self.app_session.efashion:
             lines.append(f"EFashion : {self.app_session.efashion.email}")
         self.status_label.setText("\n".join(lines))
@@ -965,7 +980,7 @@ class CatalogDesktopApp(QMainWindow):
             self.pfs_login_status.setStyleSheet("color: #b91c1c;")
             return
 
-        self.pfs_login_status.setText("Connexion PFS en cours…")
+        self.pfs_login_status.setText("Connexion au compte source en cours…")
         self.pfs_login_status.setStyleSheet("color: #6b7280;")
 
         worker = Worker(
@@ -994,7 +1009,7 @@ class CatalogDesktopApp(QMainWindow):
 
         self.app_session = self.session_store.load()
         if not self.app_session:
-            QMessageBox.warning(self, APP_NAME, "Connectez-vous à PFS d'abord.")
+            QMessageBox.warning(self, APP_NAME, "Connectez-vous au compte source d'abord.")
             return
 
         self.efashion_login_status.setText("Connexion EFashion en cours…")
@@ -1061,12 +1076,12 @@ class CatalogDesktopApp(QMainWindow):
     def _on_fetch_products(self) -> None:
         self.app_session = self.session_store.load()
         if not self.app_session or not self.app_session.pfs:
-            QMessageBox.warning(self, APP_NAME, "Connectez-vous à PFS d'abord.")
+            QMessageBox.warning(self, APP_NAME, "Connectez-vous au compte source d'abord.")
             return
 
         self._existing_refs_verified = False
         self._pending_existing_check = False
-        self.summary_label.setText("Récupération de vos produits PFS…")
+        self.summary_label.setText("Récupération de vos produits…")
         self.progress_bar.setValue(0)
         self._update_send_button_state()
 
@@ -1139,6 +1154,7 @@ class CatalogDesktopApp(QMainWindow):
         self._existing_refs_verified = False
         self.selected_ids = set()
         self.selected_update_ids = set()
+        self.progress_bar.setRange(0, 0)
         self.summary_label.setText("Vérification des produits déjà présents…")
         self._update_send_button_state()
         self._apply_reference_filter()
@@ -1179,6 +1195,7 @@ class CatalogDesktopApp(QMainWindow):
                 f"{len(self.products)} produit(s) — aucun déjà en ligne."
             )
             self._append_log("Aucune référence déjà présente sur le catalogue.")
+        self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(100)
         self._update_send_button_state()
 
@@ -1729,7 +1746,7 @@ class CatalogDesktopApp(QMainWindow):
         )
         self.progress_bar.setValue(0)
         self._append_log(
-            f"Envoi EFashion lancé : enrichissement PFS puis sync de "
+            f"Envoi EFashion lancé : enrichissement puis sync de "
             f"{count} produit(s) sélectionné(s)."
         )
 
@@ -1773,7 +1790,7 @@ class CatalogDesktopApp(QMainWindow):
             "Mettre à jour",
             (
                 f"Mettre à jour {count} produit(s) déjà en ligne ?\n\n"
-                "Seront synchronisés depuis PFS : prix, poids, catégorie, "
+                "Seront synchronisés depuis le compte source : prix, poids, catégorie, "
                 "collection, provenance et descriptions (FR/EN/IT/ES/DE).\n\n"
                 "Les infos actuelles sur EFashion seront écrasées pour ces champs."
             ),
@@ -1798,7 +1815,7 @@ class CatalogDesktopApp(QMainWindow):
         self._start_worker(worker)
 
     def _ensure_category_mappings(self, products: list[dict]) -> bool:
-        """Popup L1→L2→L3 pour les catégories PFS encore inconnues."""
+        """Popup L1→L2→L3 pour les catégories source encore inconnues."""
         assert self.app_session and self.app_session.efashion
         store = CategoryMappingStore(
             id_vendeur=self.app_session.efashion.id_vendeur
@@ -1848,8 +1865,13 @@ class CatalogDesktopApp(QMainWindow):
         return True
 
     def _on_progress(self, done: int, total: int, message: str) -> None:
-        value = int((done / total) * 100) if total else 0
-        self.progress_bar.setValue(value)
+        if total > 0:
+            if self.progress_bar.maximum() == 0:
+                self.progress_bar.setRange(0, 100)
+            value = int((done / total) * 100)
+            self.progress_bar.setValue(value)
+        else:
+            self.progress_bar.setRange(0, 0)
         self.summary_label.setText(message)
         if (
             message.startswith("Page ")

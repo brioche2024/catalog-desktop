@@ -38,7 +38,7 @@ def _parse_oauth_error(response: Response) -> str:
                 return str(message)
     except ValueError:
         pass
-    return f"Connexion PFS refusée (HTTP {response.status_code})."
+    return f"Connexion compte source refusée (HTTP {response.status_code})."
 
 
 def _extract_access_token(payload: Any) -> str | None:
@@ -88,8 +88,8 @@ def login_pfs(
 
         if oauth.status_code in {301, 302, 303, 307, 308}:
             raise AuthError(
-                "Connexion PFS : redirection inattendue. "
-                "Vérifiez que vous utilisez un compte vendeur PFS."
+                "Connexion compte source : redirection inattendue. "
+                "Vérifiez que vous utilisez un compte vendeur valide."
             )
 
         if oauth.status_code != 200:
@@ -98,11 +98,11 @@ def login_pfs(
         try:
             payload = oauth.json()
         except ValueError as exc:
-            raise AuthError("Réponse de connexion PFS invalide (JSON attendu).") from exc
+            raise AuthError("Réponse de connexion compte source invalide (JSON attendu).") from exc
 
         access_token = _extract_access_token(payload)
         if not access_token:
-            raise AuthError("Token d'accès PFS manquant après connexion.")
+            raise AuthError("Token d'accès compte source manquant après connexion.")
 
         pfs_session = PfsSession(email=email, access_token=str(access_token))
 
