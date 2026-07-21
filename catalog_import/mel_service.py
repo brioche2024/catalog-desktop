@@ -19,9 +19,20 @@ def _product_reference(product: dict) -> str:
 
 
 def validate_products_for_send(products: list[dict]) -> list[str]:
+    valid, _errors = partition_products_for_send(products)
+    if not valid:
+        raise MelSyncError("Aucun produit sélectionné valide pour l'envoi.")
+    return [_product_reference(product) for product in valid]
+
+
+def partition_products_for_send(
+    products: list[dict],
+) -> tuple[list[dict], list[str]]:
+    """Retourne (produits valides, erreurs des produits exclus)."""
     if not products:
         raise MelSyncError("Aucun produit sélectionné.")
 
+    valid: list[dict] = []
     errors: list[str] = []
     for product in products:
         reference = _product_reference(product)
@@ -31,10 +42,26 @@ def validate_products_for_send(products: list[dict]) -> list[str]:
         price = product.get("unit_price")
         if not isinstance(price, (int, float)) or price <= 0:
             errors.append(f"{reference} : prix HT manquant ou invalide.")
+            continue
+        valid.append(product)
+    return valid, errors
 
-    if errors:
-        raise MelSyncError("\n".join(errors[:8]))
-    return [_product_reference(product) for product in products]
+
+def _products_ready_after_enrichment(
+    products: list[dict],
+) -> tuple[list[dict], list[str]]:
+    ready: list[dict] = []
+    errors: list[str] = []
+    for product in products:
+        reference = _product_reference(product) or "?"
+        if not product.get("detail_loaded"):
+            errors.append(
+                f"{reference} : enrichissement incomplet "
+                "(détail produit inaccessible)."
+            )
+            continue
+        ready.append(product)
+    return ready, errors
 
 
 def _apply_enriched_inplace(originals: list[dict], enriched: list[dict]) -> None:
@@ -60,19 +87,6 @@ def _enrich_selected_products(
 
     _apply_enriched_inplace(products, enriched)
 
-    incomplete = [
-        _product_reference(product) or "?"
-        for product in products
-        if not product.get("detail_loaded")
-    ]
-    if incomplete:
-        sample = ", ".join(incomplete[:6])
-        more = f" (+{len(incomplete) - 6})" if len(incomplete) > 6 else ""
-        raise MelSyncError(
-            "Impossible d'enrichir certains produits source avant l'envoi : "
-            f"{sample}{more}."
-        )
-
 
 def send_products_to_efashion(
     efashion_session: EfashionSession,
@@ -81,8 +95,9 @@ def send_products_to_efashion(
     pfs_session: PfsSession,
     on_progress: Callable[[int, int, str], None] | None = None,
 ) -> dict[str, object]:
-    references_names = validate_products_for_send(products)
-    total = len(references_names)
+    candidates, skipped_errors = partition_products_for_send(products)
+    total_selected = len(products)
+    total = len(candidates)
     base_steps = 6
 
     def progress(done: int, message: str, total_steps: int | None = None) -> None:
@@ -93,7 +108,13 @@ def send_products_to_efashion(
         progress(done, message, total_steps=base_steps + enrich_total + total)
 
     progress(0, f"Enrichissement de {total} produit(s) sélectionné(s)…")
-    _enrich_selected_products(pfs_session, products, on_progress=enrich_progress)
+    _enrich_selected_products(pfs_session, candidates, on_progress=enrich_progress)
+
+    ready_products, enrich_errors = _products_ready_after_enrichment(candidates)
+    skipped_errors.extend(enrich_errors)
+
+    if not ready_products:
+        raise MelSyncError("\n".join(skipped_errors[:10]))
 
     try:
         with EfashionClient(efashion_session) as client:
@@ -102,8 +123,23 @@ def send_products_to_efashion(
             mapping_store = CategoryMappingStore(id_vendeur=client.session.id_vendeur)
             mapper = MelMapper(client, reference_data, category_mapping=mapping_store)
 
-            progress(2, f"Mapping source → MEL de {total} produit(s)…")
-            mel_references = mapper.map_products(products)
+            progress(2, f"Mapping source → MEL de {len(ready_products)} produit(s)…")
+            mel_references, map_errors = mapper.map_products(ready_products)
+            skipped_errors.extend(map_errors)
+
+            if not mel_references:
+                raise MelSyncError("\n".join(skipped_errors[:10]))
+
+            sent_refs = [
+                str(item.get("reference") or "").strip()
+                for item in mel_references
+                if str(item.get("reference") or "").strip()
+            ]
+            products_for_photos = [
+                product
+                for product in ready_products
+                if _product_reference(product) in sent_refs
+            ]
 
             progress(3, "Création des fiches MEL…")
             draft_result = client.save_mel_draft(mel_references)
@@ -136,7 +172,7 @@ def send_products_to_efashion(
 
                 photo_result = upload_pfs_photos_to_efashion(
                     client,
-                    products,
+                    products_for_photos,
                     shooting_ids,
                     on_progress=photo_progress,
                 )
@@ -177,13 +213,22 @@ def send_products_to_efashion(
             uploaded_photos = int(photo_result.get("uploaded_photos") or 0)
             uploaded_products = int(photo_result.get("uploaded_products") or 0)
             photo_errors = list(photo_result.get("errors") or [])
+            sent_count = len(mel_references)
 
             message_parts = [
-                f"{created or total} produit(s) créé(s) et mis en ligne "
-                f"({published} fiche(s) activée(s)).",
+                f"{created or sent_count} produit(s) créé(s) et mis en ligne "
+                f"({published} fiche(s) activée(s)) "
+                f"sur {total_selected} sélectionné(s).",
                 f"{uploaded_photos} photo(s) uploadée(s) sur S3 "
                 f"({uploaded_products} fiche(s)).",
             ]
+            if skipped_errors:
+                message_parts.append(
+                    f"{len(skipped_errors)} non envoyé(s) : "
+                    + " | ".join(skipped_errors[:6])
+                )
+                if len(skipped_errors) > 6:
+                    message_parts.append(f"(+{len(skipped_errors) - 6} autre(s))")
             if shooting_ids:
                 message_parts.append(
                     "Shooting(s) : " + ", ".join(str(sid) for sid in shooting_ids)
@@ -204,16 +249,17 @@ def send_products_to_efashion(
                 on_progress(100, 100, "Envoi EFashion terminé")
 
             return {
-                "total": created or total,
+                "total": sent_count,
                 "published": published,
-                "references": references_names,
+                "references": sent_refs,
                 "shooting_ids": [str(sid) for sid in shooting_ids],
                 "uploaded_photos": uploaded_photos,
                 "uploaded_products": uploaded_products,
-                "message": " ".join(message_parts),
+                "message": "\n".join(message_parts),
                 "notes": notes,
                 "photo_errors": photo_errors,
                 "publish_errors": publish_errors,
+                "errors": skipped_errors,
             }
     except MelMappingError as exc:
         raise MelSyncError(str(exc)) from exc

@@ -193,7 +193,7 @@ class Worker(QObject):
     efashion_step_done = Signal()
     products_ready = Signal(object, object, object)
     existing_refs_ready = Signal(object)
-    send_done = Signal(int, str)
+    send_done = Signal(int, str, object)
     update_done = Signal(int, str)
 
     def __init__(
@@ -310,6 +310,7 @@ class Worker(QObject):
                 self.send_done.emit(
                     int(result["total"]),
                     str(result.get("message") or ""),
+                    result.get("references") or [],
                 )
 
             elif self.task == "update_on_efashion":
@@ -1894,23 +1895,48 @@ class CatalogDesktopApp(QMainWindow):
         ):
             self._append_log(message)
 
-    def _on_send_done(self, count: int, message: str) -> None:
+    def _on_send_done(self, count: int, message: str, sent_refs: object = None) -> None:
         self.progress_bar.setValue(100)
-        self.selected_ids = set()
+        sent = {
+            str(ref).strip()
+            for ref in (sent_refs or [])
+            if str(ref).strip()
+        }
+        if sent:
+            for product in self.products:
+                if self._product_reference(product) in sent:
+                    self.selected_ids.discard(self._product_key(product))
+        else:
+            self.selected_ids = set()
+        self._apply_reference_filter()
+        self._update_selection_status()
         self._append_log(message or f"Création terminée : {count} produit(s).")
-        QMessageBox.information(
-            self,
-            "Créer les produits",
-            (
-                f"{count} produit(s) envoyé(s) et mis en ligne.\n\n"
-                "Les fiches sont activées et visibles sur le catalogue.\n\n"
-                "Les photos ont été uploadées.\n"
-                "Merci de vérifier l'exactitude des informations dans le "
-                "back-office si besoin."
-            ),
-        )
-        if self.products:
-            self._pending_existing_check = True
+        has_skipped = bool(message and "non envoyé" in message)
+        if has_skipped:
+            QMessageBox.warning(
+                self,
+                "Créer les produits",
+                message
+                or (
+                    f"{count} produit(s) envoyé(s).\n\n"
+                    "Certains produits sélectionnés n'ont pas pu être créés."
+                ),
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Créer les produits",
+                message
+                or (
+                    f"{count} produit(s) envoyé(s) et mis en ligne.\n\n"
+                    "Les fiches sont activées et visibles sur le catalogue.\n\n"
+                    "Les photos ont été uploadées.\n"
+                    "Merci de vérifier l'exactitude des informations dans le "
+                    "back-office si besoin."
+                ),
+            )
+        if count > 0:
+            QTimer.singleShot(0, self._on_fetch_products)
 
     def _on_update_done(self, count: int, message: str) -> None:
         self.progress_bar.setValue(100)

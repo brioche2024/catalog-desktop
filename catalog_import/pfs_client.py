@@ -337,26 +337,72 @@ def _format_variant_pack(variant: dict[str, Any]) -> str:
     return ""
 
 
-def infer_vendu_par_label(product: dict[str, Any]) -> str:
+def _variant_type(variant: dict[str, Any]) -> str:
+    if not isinstance(variant, dict):
+        return ""
+    return str(variant.get("type") or "ITEM").upper()
+
+
+def _active_variants(product: dict[str, Any]) -> list[dict[str, Any]]:
     variants = product.get("variants")
-    if not isinstance(variants, list) or not variants:
+    if not isinstance(variants, list):
+        return []
+    active = [
+        variant
+        for variant in variants
+        if isinstance(variant, dict) and variant.get("is_active") is not False
+    ]
+    if active:
+        return active
+    return [variant for variant in variants if isinstance(variant, dict)]
+
+
+def _normalize_size(size: str) -> str:
+    text = str(size or "").strip()
+    return text or "TU"
+
+
+def _item_color_and_sizes(
+    variants: list[dict[str, Any]],
+) -> tuple[set[str], set[str]]:
+    colors: set[str] = set()
+    sizes: set[str] = set()
+    for variant in variants:
+        if _variant_type(variant) != "ITEM":
+            continue
+        item = variant.get("item") if isinstance(variant.get("item"), dict) else {}
+        color = item.get("color") if isinstance(item.get("color"), dict) else {}
+        color_label = (
+            _localized_label(color.get("labels"))
+            or _first_str(color, "reference")
+            or ""
+        ).strip()
+        if color_label:
+            colors.add(color_label)
+        sizes.add(_normalize_size(_first_str(item, "size")))
+    return colors, sizes
+
+
+def infer_vendu_par_label(product: dict[str, Any]) -> str:
+    variants = _active_variants(product)
+    if not variants:
         return ""
 
-    types = {
-        str(variant.get("type") or "").upper()
-        for variant in variants
-        if isinstance(variant, dict) and variant.get("type")
-    }
+    types = {_variant_type(variant) for variant in variants if _variant_type(variant)}
     has_item = "ITEM" in types
     has_pack = "PACK" in types
 
     if has_item and has_pack:
         return "Mixte (unité + paquet)"
-    if has_pack:
-        return "Paquet"
-    if has_item:
+    if has_pack and not has_item:
+        return "Couleurs melangees"
+
+    colors, sizes = _item_color_and_sizes(variants)
+    if len(sizes) > 1:
+        return "Tailles"
+    if len(colors) > 1:
         return "Couleurs"
-    return ""
+    return "Couleurs"
 
 
 def resolve_efashion_vendu_par(product: dict[str, Any]) -> str:
@@ -366,9 +412,70 @@ def resolve_efashion_vendu_par(product: dict[str, Any]) -> str:
         # Une seule fiche pour l'instant : côté unité/couleurs.
         # Le mode paquet (même ref) pourra être envoyé à part plus tard.
         return "couleurs"
-    if "paquet" in label:
+    if "melange" in label or ("paquet" in label and "mixte" not in label):
         return "melangees"
+    if "taille" in label:
+        return "tailles"
     return "couleurs"
+
+
+def pack_color_labels(product: dict[str, Any]) -> list[str]:
+    """Couleurs présentes dans un variant PACK (melangees)."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for variant in _active_variants(product):
+        if _variant_type(variant) != "PACK":
+            continue
+        for pack in variant.get("packs") or []:
+            if not isinstance(pack, dict):
+                continue
+            color_data = pack.get("color")
+            if not isinstance(color_data, dict):
+                continue
+            label = (
+                _localized_label(color_data.get("labels"))
+                or _first_str(color_data, "reference")
+                or ""
+            ).strip()
+            if label and label not in seen:
+                seen.add(label)
+                names.append(label)
+    return names
+
+
+def pack_quantities_by_size(
+    product: dict[str, Any],
+    sizes_order: list[str] | None = None,
+) -> list[int] | None:
+    """
+    Somme les quantités PACK par taille (toutes couleurs confondues).
+    Ex. Rouge 1×S + Bleu 1×S → qty S = 2.
+    """
+    qty_by_size: dict[str, int] = {}
+    size_order: list[str] = []
+
+    for variant in _active_variants(product):
+        if _variant_type(variant) != "PACK":
+            continue
+        for pack in variant.get("packs") or []:
+            if not isinstance(pack, dict):
+                continue
+            for size_entry in pack.get("sizes") or []:
+                if not isinstance(size_entry, dict):
+                    continue
+                qty = size_entry.get("qty")
+                if not isinstance(qty, (int, float)) or qty <= 0:
+                    continue
+                size = _normalize_size(_first_str(size_entry, "size"))
+                qty_by_size[size] = qty_by_size.get(size, 0) + int(qty)
+                if size not in size_order:
+                    size_order.append(size)
+
+    if not qty_by_size:
+        return None
+
+    order = sizes_order or size_order
+    return [qty_by_size.get(size, 0) for size in order]
 
 
 def catalog_presence_key(reference: str, vendu_par: str) -> str:
@@ -383,7 +490,7 @@ def product_pack_label(product: dict[str, Any]) -> str:
     labels: list[str] = []
     seen: set[str] = set()
     for variant in variants:
-        if not isinstance(variant, dict) or variant.get("type") != "PACK":
+        if not isinstance(variant, dict) or _variant_type(variant) != "PACK":
             continue
         label = _format_variant_pack(variant)
         if label and label not in seen:
