@@ -77,6 +77,7 @@ class CategoryMappingDialog(QDialog):
         l1_options: list[dict],
         l2_options: list[dict],
         l3_options: list[dict],
+        initial_entry: CategoryMappingEntry | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -121,10 +122,25 @@ class CategoryMappingDialog(QDialog):
         self.l2_combo.currentIndexChanged.connect(self._on_l2_changed)
         self._on_l1_changed()
 
+        if initial_entry and initial_entry.l1_id:
+            self._select_combo_data(self.l1_combo, initial_entry.l1_id)
+            self._on_l1_changed()
+            if initial_entry.l2_id:
+                self._select_combo_data(self.l2_combo, initial_entry.l2_id)
+                self._on_l2_changed()
+                if initial_entry.id:
+                    self._select_combo_data(self.l3_combo, initial_entry.id)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    @staticmethod
+    def _select_combo_data(combo: QComboBox, value: str) -> None:
+        index = combo.findData(str(value))
+        if index >= 0:
+            combo.setCurrentIndex(index)
 
     def _on_l1_changed(self) -> None:
         self.l2_combo.blockSignals(True)
@@ -182,6 +198,206 @@ class CategoryMappingDialog(QDialog):
             gender=self.gender,
         )
         self.accept()
+
+
+def _gender_display_label(gender: str) -> str:
+    labels = {
+        "MAN": "Homme",
+        "WOMAN": "Femme",
+        "UNISEX": "Unisex",
+        "KID": "Enfant",
+        "*": "Tous genres",
+    }
+    return labels.get(str(gender or "").strip().upper(), gender or "—")
+
+
+def _split_mapping_key(key: str) -> tuple[str, str]:
+    if "|" in key:
+        category, gender = key.split("|", 1)
+        return category, gender
+    return key, "*"
+
+
+class CategoryMappingManagerDialog(QDialog):
+    """Liste visuelle des correspondances catégories source → EFashion."""
+
+    def __init__(
+        self,
+        *,
+        store: CategoryMappingStore,
+        id_vendeur: int,
+        efashion_session,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Mapping catégories")
+        self.setMinimumSize(780, 420)
+        self.store = store
+        self.id_vendeur = id_vendeur
+        self.efashion_session = efashion_session
+        self._reference_data: dict | None = None
+        self.changed = False
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        intro = QLabel(
+            "Correspondances enregistrées entre vos catégories source et le catalogue EFashion. "
+            "Sélectionnez une ligne pour la modifier ou la supprimer."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #374151;")
+        layout.addWidget(intro)
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(
+            ["Catégorie source", "Genre", "Catégorie EFashion"]
+        )
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        layout.addWidget(self.table)
+
+        self.empty_label = QLabel("Aucun mapping enregistré pour l'instant.")
+        self.empty_label.setStyleSheet("color: #6b7280; font-style: italic;")
+        self.empty_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.empty_label)
+
+        buttons = QHBoxLayout()
+        self.edit_button = QPushButton("Modifier")
+        self.edit_button.clicked.connect(self._on_edit)
+        buttons.addWidget(self.edit_button)
+
+        self.delete_button = QPushButton("Supprimer")
+        self.delete_button.setProperty("class", "secondary")
+        self.delete_button.clicked.connect(self._on_delete)
+        buttons.addWidget(self.delete_button)
+
+        buttons.addStretch()
+
+        close_button = QPushButton("Fermer")
+        close_button.clicked.connect(self.accept)
+        buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+
+        self._reload_table()
+
+    def _reload_table(self) -> None:
+        entries = self.store.sorted_entries()
+        self.table.setRowCount(len(entries))
+        has_rows = bool(entries)
+        self.table.setVisible(has_rows)
+        self.empty_label.setVisible(not has_rows)
+        self.edit_button.setEnabled(has_rows)
+        self.delete_button.setEnabled(has_rows)
+
+        for row, (key, entry) in enumerate(entries):
+            category, gender = _split_mapping_key(key)
+            pfs_label = entry.pfs_category or category
+            self.table.setItem(row, 0, QTableWidgetItem(pfs_label))
+            self.table.setItem(row, 1, QTableWidgetItem(_gender_display_label(gender)))
+            ef_label = entry.label or entry.id
+            ef_item = QTableWidgetItem(ef_label)
+            ef_item.setData(Qt.UserRole, key)
+            self.table.setItem(row, 2, ef_item)
+
+        if has_rows:
+            self.table.selectRow(0)
+
+    def _selected_key(self) -> str | None:
+        row = self.table.currentRow()
+        if row < 0:
+            return None
+        item = self.table.item(row, 2)
+        if item is None:
+            return None
+        key = item.data(Qt.UserRole)
+        return str(key) if key else None
+
+    def _load_reference_data(self) -> dict | None:
+        if self._reference_data is not None:
+            return self._reference_data
+        try:
+            with EfashionClient(self.efashion_session) as client:
+                self._reference_data = client.get_reference_data()
+        except EfashionApiError:
+            return None
+        return self._reference_data
+
+    def _on_edit(self) -> None:
+        key = self._selected_key()
+        if not key:
+            QMessageBox.information(self, APP_NAME, "Sélectionnez un mapping à modifier.")
+            return
+
+        entry = self.store.get(key)
+        if entry is None:
+            self._reload_table()
+            return
+
+        reference_data = self._load_reference_data()
+        if not reference_data:
+            QMessageBox.critical(
+                self,
+                APP_NAME,
+                "Impossible de charger les catégories EFashion.",
+            )
+            return
+
+        category, gender = _split_mapping_key(key)
+        pfs_label = entry.pfs_category or category or "Sans catégorie"
+        l1, l2, l3 = category_options_from_reference(reference_data)
+        dialog = CategoryMappingDialog(
+            mapping_key=key,
+            pfs_label=pfs_label,
+            gender=gender,
+            l1_options=l1,
+            l2_options=l2,
+            l3_options=l3,
+            initial_entry=entry,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted or not dialog.selected_entry:
+            return
+
+        self.store.set_entry(key, dialog.selected_entry)
+        self.changed = True
+        self._reload_table()
+
+    def _on_delete(self) -> None:
+        key = self._selected_key()
+        if not key:
+            QMessageBox.information(self, APP_NAME, "Sélectionnez un mapping à supprimer.")
+            return
+
+        entry = self.store.get(key)
+        category, gender = _split_mapping_key(key)
+        pfs_label = (entry.pfs_category if entry else None) or category
+        ef_label = entry.label if entry else "—"
+
+        reply = QMessageBox.question(
+            self,
+            "Supprimer le mapping",
+            (
+                f"Supprimer la correspondance ?\n\n"
+                f"Source : {pfs_label} ({_gender_display_label(gender)})\n"
+                f"EFashion : {ef_label}\n\n"
+                "Ce mapping vous sera redemandé au prochain envoi."
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self.store.delete_entry(key)
+        self.changed = True
+        self._reload_table()
 
 
 class Worker(QObject):
@@ -631,6 +847,10 @@ class CatalogDesktopApp(QMainWindow):
         title.setFont(QFont("", 22, QFont.Bold))
         header.addWidget(title)
         header.addStretch()
+        self.category_mapping_button = QPushButton("Mapping catégories")
+        self.category_mapping_button.setProperty("class", "secondary")
+        self.category_mapping_button.clicked.connect(self._on_manage_category_mappings)
+        header.addWidget(self.category_mapping_button)
         self.logout_button = QPushButton("Déconnexion")
         self.logout_button.setProperty("class", "secondary")
         self.logout_button.clicked.connect(self._on_logout)
@@ -1864,6 +2084,29 @@ class CatalogDesktopApp(QMainWindow):
                 f"{dialog.selected_entry.label} ({dialog.selected_entry.id})"
             )
         return True
+
+    def _on_manage_category_mappings(self) -> None:
+        self.app_session = self.session_store.load()
+        if not self.app_session or not self.app_session.efashion:
+            QMessageBox.warning(
+                self,
+                APP_NAME,
+                "Connectez-vous au compte EFashion pour gérer les mappings.",
+            )
+            return
+
+        store = CategoryMappingStore(
+            id_vendeur=self.app_session.efashion.id_vendeur
+        )
+        dialog = CategoryMappingManagerDialog(
+            store=store,
+            id_vendeur=self.app_session.efashion.id_vendeur,
+            efashion_session=self.app_session.efashion,
+            parent=self,
+        )
+        dialog.exec()
+        if dialog.changed and self.app_session and self.app_session.pfs:
+            QTimer.singleShot(0, self._on_fetch_products)
 
     def _on_progress(self, done: int, total: int, message: str) -> None:
         if total > 0:

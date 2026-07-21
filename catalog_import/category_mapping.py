@@ -130,6 +130,16 @@ class CategoryMappingStore:
         self.entries[key] = entry
         self.save()
 
+    def delete_entry(self, key: str) -> bool:
+        if key not in self.entries:
+            return False
+        del self.entries[key]
+        self.save()
+        return True
+
+    def sorted_entries(self) -> list[tuple[str, CategoryMappingEntry]]:
+        return sorted(self.entries.items(), key=lambda item: item[0].lower())
+
     def missing_keys_for_products(self, products: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
         """Retourne les clés manquantes uniques avec un produit exemple."""
         missing: list[tuple[str, dict[str, Any]]] = []
