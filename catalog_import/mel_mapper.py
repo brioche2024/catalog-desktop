@@ -6,7 +6,13 @@ from typing import Any
 
 from .category_mapping import CategoryMappingStore, mapping_key_for_product
 from .efashion_client import EfashionApiError, EfashionClient
-from .pfs_client import infer_vendu_par_label, product_weight_kg, resolve_efashion_vendu_par
+from .pfs_client import (
+    infer_vendu_par_label,
+    pack_color_labels,
+    pack_quantities_by_size,
+    product_weight_kg,
+    resolve_efashion_vendu_par,
+)
 
 
 class MelMappingError(Exception):
@@ -95,6 +101,12 @@ def _first_str(*values: Any) -> str:
     return ""
 
 
+def _size_label(value: Any) -> str:
+    if isinstance(value, dict):
+        return str(value.get("size") or "").strip()
+    return str(value or "").strip()
+
+
 def _match_by_label(
     items: list[dict[str, Any]],
     needle: str,
@@ -135,7 +147,9 @@ class MelMapper:
     def refresh(self) -> None:
         self.reference_data = self.client.get_reference_data()
 
-    def map_products(self, products: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def map_products(
+        self, products: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], list[str]]:
         mapped: list[dict[str, Any]] = []
         errors: list[str] = []
         for product in products:
@@ -143,9 +157,7 @@ class MelMapper:
                 mapped.append(self.map_one(product))
             except MelMappingError as exc:
                 errors.append(str(exc))
-        if errors:
-            raise MelMappingError("\n".join(errors[:10]))
-        return mapped
+        return mapped, errors
 
     def map_one(self, product: dict[str, Any]) -> dict[str, Any]:
         reference = _first_str(product.get("reference"), product.get("sku"))
@@ -340,6 +352,11 @@ class MelMapper:
                     names.append(label)
 
         if not names:
+            for label in pack_color_labels(product):
+                if label not in names:
+                    names.append(label)
+
+        if not names:
             raise MelMappingError(
                 f"{_first_str(product.get('reference'))} : aucune couleur trouvée."
             )
@@ -513,7 +530,7 @@ class MelMapper:
             if not isinstance(variant, dict):
                 continue
             item = variant.get("item") if isinstance(variant.get("item"), dict) else {}
-            size = _first_str(item.get("size"))
+            size = _size_label(item.get("size"))
             if size and size not in found:
                 found.append(size)
             for pack in variant.get("packs") or []:
@@ -522,7 +539,7 @@ class MelMapper:
                 for size_entry in pack.get("sizes") or []:
                     if not isinstance(size_entry, dict):
                         continue
-                    size = _first_str(size_entry.get("size"))
+                    size = _size_label(size_entry)
                     if size and size not in found:
                         found.append(size)
         return found or ["TU"]
@@ -565,29 +582,25 @@ class MelMapper:
         return int(decl["id_declinaison"])
 
     def _pack_quantities(self, product: dict[str, Any]) -> list[int]:
-        variants = product.get("variants") if isinstance(product.get("variants"), list) else []
-        for variant in variants:
-            if not isinstance(variant, dict):
-                continue
-            if str(variant.get("type") or "").upper() != "PACK":
-                continue
-            qtys: list[int] = []
-            for pack in variant.get("packs") or []:
-                if not isinstance(pack, dict):
-                    continue
-                for size_entry in pack.get("sizes") or []:
-                    if not isinstance(size_entry, dict):
-                        continue
-                    qty = size_entry.get("qty")
-                    if isinstance(qty, (int, float)) and qty > 0:
-                        qtys.append(int(qty))
-            if qtys:
-                return qtys
-            pieces = variant.get("pieces")
-            if isinstance(pieces, (int, float)) and pieces > 0:
-                return [int(pieces)]
+        vendu_par = self._resolve_vendu_par(product)
+        sizes = self._sizes_from_product(product)
 
-        # ITEM → pack unitaire
+        if vendu_par == "melangees":
+            aggregated = pack_quantities_by_size(product, sizes)
+            if aggregated and any(qty > 0 for qty in aggregated):
+                return aggregated
+
+            variants = product.get("variants") if isinstance(product.get("variants"), list) else []
+            for variant in variants:
+                if not isinstance(variant, dict):
+                    continue
+                if str(variant.get("type") or "").upper() != "PACK":
+                    continue
+                pieces = variant.get("pieces")
+                if isinstance(pieces, (int, float)) and pieces > 0:
+                    return [int(pieces)]
+
+        # Couleurs (ou fallback) → pack unitaire
         return [1]
 
     def _ensure_pack(self, product: dict[str, Any]) -> int:
