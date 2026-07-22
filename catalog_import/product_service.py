@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from .config import DEFAULT_PRODUCT_STATUS, OUTPUT_DIR
+from .config import OUTPUT_DIR
 from .pfs_client import PfsApiError, PfsClient, product_weight_kg
 from .session_store import PfsSession
 
@@ -13,13 +13,11 @@ from .session_store import PfsSession
 def fetch_pfs_products(
     session: PfsSession,
     *,
-    status: str = DEFAULT_PRODUCT_STATUS,
     enrich_details: bool = False,
     on_progress: Callable[[int, int, str], None] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     with PfsClient(session) as client:
         return client.fetch_catalog(
-            status=status,
             enrich_details=enrich_details,
             on_progress=on_progress,
         )

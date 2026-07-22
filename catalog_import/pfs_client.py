@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
@@ -13,6 +14,10 @@ from .config import (
     DEFAULT_PER_PAGE,
     DEFAULT_PRODUCT_STATUS,
     DEFAULT_VARIANTS_STATUS,
+    PFS_ACTIVE_PRODUCT_STATUSES,
+    PFS_CATALOG_PRODUCT_STATUSES,
+    PFS_DISABLED_PRODUCT_STATUSES,
+    PFS_DRAFT_PRODUCT_STATUSES,
     PFS_LIST_PRODUCTS_URL,
     PFS_LIST_VARIANTS_URL,
     PFS_PRODUCT_URL,
@@ -181,6 +186,31 @@ def _total_stock(product: dict[str, Any]) -> int:
         if isinstance(qty, (int, float)):
             total += int(qty)
     return total
+
+
+def product_pfs_status(product: dict[str, Any]) -> str:
+    return _first_str(product, "status", "state").upper()
+
+
+def classify_pfs_product(product: dict[str, Any]) -> str:
+    """Retourne 'disabled', 'draft' ou 'active' selon le statut PFS."""
+    status = product_pfs_status(product)
+    if status in PFS_DISABLED_PRODUCT_STATUSES:
+        return "disabled"
+    if status in PFS_DRAFT_PRODUCT_STATUSES:
+        return "draft"
+    if status in PFS_ACTIVE_PRODUCT_STATUSES or status == DEFAULT_PRODUCT_STATUS:
+        return "active"
+    # READY_FOR_SALE, etc. : actif par défaut si vendable
+    return "active"
+
+
+def product_is_pfs_disabled(product: dict[str, Any]) -> bool:
+    return classify_pfs_product(product) == "disabled"
+
+
+def product_is_pfs_draft(product: dict[str, Any]) -> bool:
+    return classify_pfs_product(product) == "draft"
 
 
 def _format_composition(items: Any) -> str:
@@ -383,6 +413,293 @@ def _item_color_and_sizes(
     return colors, sizes
 
 
+def _variant_has_stock(variant: dict[str, Any]) -> bool:
+    if not isinstance(variant, dict):
+        return False
+    in_stock = variant.get("in_stock")
+    if in_stock is True:
+        return True
+    if in_stock is False:
+        return False
+    qty = variant.get("stock_qty")
+    if isinstance(qty, (int, float)):
+        return int(qty) > 0
+    return False
+
+
+def _variant_color_label(variant: dict[str, Any]) -> str:
+    if _variant_type(variant) == "ITEM":
+        item = variant.get("item") if isinstance(variant.get("item"), dict) else {}
+        color = item.get("color") if isinstance(item.get("color"), dict) else {}
+        return (
+            _localized_label(color.get("labels"))
+            or _first_str(color, "reference")
+            or ""
+        ).strip()
+    if _variant_type(variant) == "PACK":
+        pack_colors = _colors_in_pack_variant(variant)
+        if len(pack_colors) == 1:
+            return next(iter(pack_colors))
+    return ""
+
+
+def _variant_item_size_label(variant: dict[str, Any]) -> str:
+    if _variant_type(variant) != "ITEM":
+        return ""
+    item = variant.get("item") if isinstance(variant.get("item"), dict) else {}
+    return _normalize_size(_first_str(item, "size"))
+
+
+def _variants_by_color(
+    product: dict[str, Any],
+) -> dict[str, tuple[str, list[dict[str, Any]]]]:
+    """Regroupe les variantes actives par couleur (clé normalisée → libellé + variantes)."""
+    grouped: dict[str, tuple[str, list[dict[str, Any]]]] = {}
+    for variant in _active_variants(product):
+        color_label = _variant_color_label(variant)
+        if not color_label:
+            continue
+        key = color_label.strip().upper()
+        if key not in grouped:
+            grouped[key] = (color_label, [])
+        grouped[key][1].append(variant)
+    return grouped
+
+
+def product_is_out_of_stock(product: dict[str, Any]) -> bool:
+    """True si aucune variante active n'est disponible."""
+    variants = _active_variants(product)
+    if not variants:
+        return True
+    return not any(_variant_has_stock(variant) for variant in variants)
+
+
+def mel_rupture_stock_by_color(product: dict[str, Any]) -> dict[str, int]:
+    """Couleurs en rupture → stock 0 (libellé couleur PFS)."""
+    rupture: dict[str, int] = {}
+    for color_label, variants in _variants_by_color(product).values():
+        if variants and not any(_variant_has_stock(variant) for variant in variants):
+            rupture[color_label] = 0
+    return rupture
+
+
+def mel_stock_qty_by_color(product: dict[str, Any]) -> dict[str, int]:
+    """
+    Quantité stock par couleur (somme stock_qty des variantes actives).
+    0 si rupture ; omis si en stock sans qty numérique.
+    """
+    result: dict[str, int] = {}
+    for color_label, variants in _variants_by_color(product).values():
+        if not variants:
+            continue
+        if not any(_variant_has_stock(variant) for variant in variants):
+            result[color_label] = 0
+            continue
+        total = 0
+        saw_qty = False
+        for variant in variants:
+            qty = variant.get("stock_qty")
+            if isinstance(qty, (int, float)):
+                saw_qty = True
+                total += max(int(qty), 0)
+        if saw_qty:
+            result[color_label] = total
+    return result
+
+
+def mel_taille_stock_qtys(
+    product: dict[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
+    """Par couleur : stocks par taille (quantity depuis stock_qty / rupture)."""
+    result: dict[str, list[dict[str, Any]]] = {}
+    for variant in _active_variants(product):
+        if _variant_type(variant) != "ITEM":
+            continue
+        color_label = _variant_color_label(variant)
+        if not color_label:
+            continue
+        size = _variant_item_size_label(variant)
+        qty = variant.get("stock_qty")
+        if isinstance(qty, (int, float)):
+            quantity = max(int(qty), 0)
+        elif _variant_has_stock(variant):
+            continue
+        else:
+            quantity = 0
+        stocks = result.setdefault(color_label, [])
+        existing = next((e for e in stocks if e.get("taille") == size), None)
+        if existing:
+            existing["quantity"] = int(existing.get("quantity") or 0) + quantity
+        else:
+            stocks.append({"taille": size, "quantity": quantity})
+    return result
+
+
+def _color_lookup_keys(color_label: str) -> set[str]:
+    """Clés UPPER pour matcher un libellé couleur (BLACK ↔ NOIR via alias)."""
+    raw = str(color_label or "").strip()
+    if not raw:
+        return set()
+    keys = {raw.upper(), _color_match_key(raw).upper()}
+    try:
+        from .mel_mapper import PFS_COLOR_ALIASES
+    except Exception:
+        return {k for k in keys if k}
+
+    upper = raw.upper()
+    for alias in PFS_COLOR_ALIASES.get(upper, []):
+        keys.add(str(alias).strip().upper())
+    for pfs_key, aliases in PFS_COLOR_ALIASES.items():
+        bucket = {pfs_key.upper(), *(str(a).strip().upper() for a in aliases)}
+        if keys & bucket:
+            keys |= bucket
+    return {k for k in keys if k}
+
+
+def color_is_available(product: dict[str, Any], color_label: str) -> bool:
+    """True si au moins une variante active de cette couleur est en stock."""
+    if not color_label:
+        return False
+    wanted = _color_lookup_keys(color_label)
+    if not wanted:
+        return False
+
+    # Variantes actives de cette couleur (clés FR/EN)
+    for key, (_label, variants) in _variants_by_color(product).items():
+        if key not in wanted and _color_match_key(key).upper() not in wanted:
+            continue
+        return any(_variant_has_stock(variant) for variant in variants)
+
+    # Couleur présente seulement en variantes inactives → indisponible
+    raw_variants = product.get("variants")
+    if isinstance(raw_variants, list):
+        saw_color = False
+        for variant in raw_variants:
+            if not isinstance(variant, dict):
+                continue
+            label = _variant_color_label(variant)
+            if not label:
+                continue
+            label_keys = _color_lookup_keys(label)
+            if not (label_keys & wanted):
+                continue
+            saw_color = True
+            if variant.get("is_active") is not False and _variant_has_stock(variant):
+                return True
+        if saw_color:
+            return False
+
+    # Pas d'info variante → on ne bloque pas
+    return True
+
+
+def inactive_variant_color_labels(product: dict[str, Any]) -> list[str]:
+    """Libellés couleur des variantes dont toutes les occurrences sont is_active=false."""
+    raw_variants = product.get("variants")
+    if not isinstance(raw_variants, list) or not raw_variants:
+        return []
+
+    active_keys: set[str] = set()
+    inactive_labels: dict[str, str] = {}
+
+    for variant in raw_variants:
+        if not isinstance(variant, dict):
+            continue
+        label = _variant_color_label(variant)
+        if not label:
+            continue
+        key = _color_match_key(label)
+        if variant.get("is_active") is not False:
+            active_keys.add(key)
+            inactive_labels.pop(key, None)
+        elif key not in active_keys:
+            inactive_labels[key] = label
+
+    return list(inactive_labels.values())
+
+
+def _color_match_key(label: str) -> str:
+    return " ".join(str(label or "").strip().lower().split())
+
+
+def product_default_color_label(product: dict[str, Any]) -> str:
+    default = product.get("default_color")
+    if isinstance(default, dict):
+        return (
+            _localized_label(default.get("labels"))
+            or _first_str(default, "reference", "name")
+            or ""
+        ).strip()
+    if isinstance(default, str):
+        return default.strip()
+    return ""
+
+
+def resolve_main_color_label(
+    product: dict[str, Any], color_names: list[str]
+) -> str | None:
+    """
+    Choisit la couleur principale MEL :
+    - défaut PFS s'il est disponible
+    - sinon première couleur disponible (secondaire active)
+    - sinon première de la liste (tout en rupture)
+    """
+    if not color_names:
+        return None
+
+    preferred = product_default_color_label(product)
+    preferred_key = _color_match_key(preferred) if preferred else ""
+
+    def _matches_preferred(name: str) -> bool:
+        if not preferred_key:
+            return False
+        key = _color_match_key(name)
+        return key == preferred_key or preferred_key in key or key in preferred_key
+
+    if preferred_key:
+        for name in color_names:
+            if _matches_preferred(name) and color_is_available(product, name):
+                return name
+        # Principale PFS indisponible → première secondaire encore en stock
+        for name in color_names:
+            if _matches_preferred(name):
+                continue
+            if color_is_available(product, name):
+                return name
+
+    for name in color_names:
+        if color_is_available(product, name):
+            return name
+    return color_names[0]
+
+
+def mel_rupture_taille_stocks(
+    product: dict[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
+    """Par couleur, tailles en rupture (quantity=0 pour EFashion)."""
+    result: dict[str, list[dict[str, Any]]] = {}
+    for variant in _active_variants(product):
+        if _variant_type(variant) != "ITEM":
+            continue
+        color_label = _variant_color_label(variant)
+        if not color_label or _variant_has_stock(variant):
+            continue
+        size = _variant_item_size_label(variant)
+        stocks = result.setdefault(color_label, [])
+        if not any(entry.get("taille") == size for entry in stocks):
+            stocks.append({"taille": size, "quantity": 0})
+    return result
+
+
+def efashion_mel_stock(product: dict[str, Any]) -> str:
+    """Stock global MEL (mode melangees uniquement) : « 0 » si tout est en rupture."""
+    if resolve_efashion_vendu_par(product) != "melangees":
+        return ""
+    if product_is_out_of_stock(product):
+        return "0"
+    return ""
+
+
 def _colors_in_pack_variant(variant: dict[str, Any]) -> set[str]:
     colors: set[str] = set()
     for pack in variant.get("packs") or []:
@@ -570,6 +887,114 @@ def product_pack_label(product: dict[str, Any]) -> str:
     return " | ".join(labels)
 
 
+def pack_variant_signature(variant: dict[str, Any]) -> str:
+    """
+    Signature stable d'un pack pour regrouper ×4 / ×6 / 3-3, etc.
+    Ex. « 4 », « 6 », « 3-3 ».
+    """
+    if not isinstance(variant, dict) or _variant_type(variant) != "PACK":
+        return ""
+
+    qty_by_size: dict[str, int] = {}
+    size_order: list[str] = []
+    for pack in variant.get("packs") or []:
+        if not isinstance(pack, dict):
+            continue
+        for size_entry in pack.get("sizes") or []:
+            if not isinstance(size_entry, dict):
+                continue
+            qty = size_entry.get("qty")
+            if not isinstance(qty, (int, float)) or qty <= 0:
+                continue
+            size = _normalize_size(_first_str(size_entry, "size"))
+            qty_by_size[size] = qty_by_size.get(size, 0) + int(qty)
+            if size not in size_order:
+                size_order.append(size)
+    if qty_by_size:
+        return "-".join(str(qty_by_size[size]) for size in size_order)
+
+    pieces = variant.get("pieces")
+    if isinstance(pieces, (int, float)) and pieces > 0:
+        return str(int(pieces))
+    return ""
+
+
+def group_pack_variants_by_signature(
+    product: dict[str, Any],
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Regroupe les variantes PACK actives par signature (×4, ×6…)."""
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for variant in _active_variants(product):
+        if _variant_type(variant) != "PACK":
+            continue
+        signature = pack_variant_signature(variant)
+        if not signature:
+            continue
+        if signature not in grouped:
+            grouped[signature] = []
+            order.append(signature)
+        grouped[signature].append(variant)
+    return [(signature, grouped[signature]) for signature in order]
+
+
+def expand_product_by_distinct_packs(product: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Même ref vendue en packs distincts (ex. ×4 et ×6) → une fiche par pack,
+    avec référence préfixée (x4-REF, x6-REF) pour éviter les doublons EFashion.
+    """
+    groups = group_pack_variants_by_signature(product)
+    if len(groups) <= 1:
+        return [product]
+
+    base_ref = _first_str(product, "reference", "sku")
+    if not base_ref:
+        return [product]
+
+    non_pack = [
+        variant
+        for variant in (product.get("variants") or [])
+        if isinstance(variant, dict) and _variant_type(variant) != "PACK"
+    ]
+
+    expanded: list[dict[str, Any]] = []
+    for signature, pack_variants in groups:
+        clone = copy.deepcopy(product)
+        new_ref = f"x{signature}-{base_ref}"
+        clone["reference"] = new_ref
+        clone["reference_source"] = base_ref
+        clone["pack_split_signature"] = signature
+        clone["variants"] = list(non_pack) + list(pack_variants)
+        clone["variants_loaded"] = True
+        # Couleurs du pack uniquement (pas toute la liste d'origine)
+        pack_colors = pack_color_labels(clone)
+        if pack_colors:
+            clone["colors"] = ";".join(pack_colors)
+            clone.pop("couleurs", None)
+        clone["pack_label"] = product_pack_label(clone)
+        clone["vendu_par_label"] = infer_vendu_par_label(clone)
+        expanded.append(clone)
+    return expanded
+
+
+def expand_products_by_distinct_packs(
+    products: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Étend la liste ; notes informatives si des refs ont été dédoublées."""
+    result: list[dict[str, Any]] = []
+    notes: list[str] = []
+    for product in products:
+        base_ref = _first_str(product, "reference", "sku") or "?"
+        expanded = expand_product_by_distinct_packs(product)
+        if len(expanded) > 1:
+            refs = ", ".join(_first_str(item, "reference") for item in expanded)
+            notes.append(
+                f"{base_ref} : {len(expanded)} packs distincts → fiches {refs}"
+            )
+        result.extend(expanded)
+    return result, notes
+
+
 def merge_list_variants_index(
     products: list[dict[str, Any]], variants_by_id: dict[str, list[dict[str, Any]]]
 ) -> list[dict[str, Any]]:
@@ -637,15 +1062,27 @@ def _color_label_map(product: dict[str, Any]) -> dict[str, str]:
     variants = product.get("variants")
     if not isinstance(variants, list):
         return mapping
+
+    def _add_color(color: dict[str, Any]) -> None:
+        reference = color.get("reference")
+        if not reference:
+            return
+        label = _localized_label(color.get("labels")) or str(reference)
+        mapping[str(reference).upper()] = label
+
     for variant in variants:
         if not isinstance(variant, dict):
             continue
         item = variant.get("item") if isinstance(variant.get("item"), dict) else {}
         color = item.get("color") if isinstance(item.get("color"), dict) else {}
-        reference = color.get("reference")
-        if reference:
-            label = _localized_label(color.get("labels")) or str(reference)
-            mapping[str(reference).upper()] = label
+        if color:
+            _add_color(color)
+        for pack in variant.get("packs") or []:
+            if not isinstance(pack, dict):
+                continue
+            pack_color = pack.get("color") if isinstance(pack.get("color"), dict) else {}
+            if pack_color:
+                _add_color(pack_color)
     return mapping
 
 
@@ -1218,17 +1655,38 @@ class PfsClient:
     def fetch_catalog(
         self,
         *,
-        status: str = DEFAULT_PRODUCT_STATUS,
+        statuses: tuple[str, ...] | None = None,
+        status: str | None = None,
         variants_status: str = DEFAULT_VARIANTS_STATUS,
         per_page: int = DEFAULT_PER_PAGE,
         enrich_details: bool = False,
         on_progress: Callable[[int, int, str], None] | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-        products, raw_pages = self.fetch_all_products(
-            status=status,
-            per_page=per_page,
-            on_progress=on_progress,
-        )
+        if status is not None:
+            catalog_statuses = (status,)
+        elif statuses is not None:
+            catalog_statuses = statuses
+        else:
+            catalog_statuses = PFS_CATALOG_PRODUCT_STATUSES
+
+        products: list[dict[str, Any]] = []
+        raw_pages: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        for catalog_status in catalog_statuses:
+            batch, pages = self.fetch_all_products(
+                status=catalog_status,
+                per_page=per_page,
+                on_progress=on_progress,
+            )
+            raw_pages.extend(pages)
+            for product in batch:
+                product_id = _first_str(product, "id")
+                if product_id:
+                    if product_id in seen_ids:
+                        continue
+                    seen_ids.add(product_id)
+                products.append(product)
 
         variants_by_id, raw_variant_pages = self.fetch_all_list_variants(
             status=variants_status,

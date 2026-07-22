@@ -9,7 +9,7 @@ from .config import USER_AGENT
 from .http_client import create_http_session
 from .efashion_client import EfashionApiError, EfashionClient
 from .mel_mapper import PFS_COLOR_ALIASES
-from .pfs_client import product_images_by_color
+from .pfs_client import product_images_by_color, resolve_efashion_vendu_par
 
 MAX_PHOTOS_PER_REQUEST = 10
 MAX_PHOTOS_PER_PRODUCT = 20
@@ -172,7 +172,7 @@ def _pair_remaining_by_order(
     ef_products: list[dict[str, Any]],
     already_used: set[int],
 ) -> list[tuple[str, str, int, list[str]]]:
-    """Dernier recours : associe les couleurs restantes 1:1 dans l'ordre."""
+    """Associe les couleurs restantes par alias de couleur (pas un dump sur la principale)."""
     paired: list[tuple[str, str, int, list[str]]] = []
     by_ref: dict[str, list[tuple[str, str, list[str]]]] = {}
     for reference, color_label, urls in jobs_unmatched:
@@ -190,10 +190,34 @@ def _pair_remaining_by_order(
                 or _normalize(str(item.get("reference") or "")).startswith(base_norm)
             )
         ]
-        for job, item in zip(pending, available):
-            product_id = int(item["id"])
-            already_used.add(product_id)
-            paired.append((job[0], job[1], product_id, job[2]))
+        still_pending: list[tuple[str, str, list[str]]] = []
+        for reference_job, color_label, urls in pending:
+            match_id = None
+            for item in available:
+                product_id = int(item["id"])
+                if product_id in already_used:
+                    continue
+                ef_color = _extract_efashion_color(
+                    str(item.get("reference") or ""),
+                    str(item.get("referenceBase") or ""),
+                )
+                if not ef_color:
+                    continue
+                if _normalize(ef_color) in _color_aliases(color_label) or (
+                    _color_aliases(ef_color) & _color_aliases(color_label)
+                ):
+                    match_id = product_id
+                    break
+            if match_id is None:
+                still_pending.append((reference_job, color_label, urls))
+                continue
+            already_used.add(match_id)
+            paired.append((reference_job, color_label, match_id, urls))
+
+        # Pas de fallback ordonné : éviter d'envoyer les photos d'une couleur
+        # sur la fiche principale d'une autre couleur.
+        _ = still_pending
+
     return paired
 
 
@@ -219,6 +243,22 @@ def fetch_upload_products_for_shootings(
             break
         page += 1
     return items
+
+
+def _urls_for_color_label(
+    groups: list[tuple[str, list[str]]],
+    color_label: str,
+) -> list[str]:
+    """Photos PFS d'une seule couleur (jamais l'agrégat multi-couleurs)."""
+    if not color_label:
+        return []
+    wanted = _color_aliases(color_label)
+    for label, urls in groups:
+        if not label:
+            continue
+        if _normalize(label) in wanted or (_color_aliases(label) & wanted):
+            return list(urls)[:MAX_PHOTOS_PER_PRODUCT]
+    return []
 
 
 def upload_pfs_photos_to_efashion(
@@ -251,26 +291,72 @@ def upload_pfs_photos_to_efashion(
             continue
 
         candidates = _efashion_candidates_for_reference(ef_products, reference)
+        vendu_par = resolve_efashion_vendu_par(product)
         single_fiche_id = _single_fiche_product_id(candidates)
-        if single_fiche_id is not None:
-            # Une seule fiche EFashion (melangees, tailles, 1 couleur…) :
-            # toutes les photos PFS vont dessus.
-            urls = _aggregate_photo_urls(groups)
-            used_ids.add(single_fiche_id)
-            jobs.append((reference, "MAIN", single_fiche_id, urls))
+
+        # Couleurs mélangées uniquement : toutes les photos sur la fiche unique.
+        if vendu_par == "melangees":
+            target_id = single_fiche_id
+            if target_id is None and candidates:
+                main = next((item for item in candidates if item.get("main")), None)
+                target = main or candidates[0]
+                if target.get("id") is not None:
+                    target_id = int(target["id"])
+            if target_id is None:
+                errors.append(f"{reference} : fiche EFashion introuvable (mélangées).")
+                continue
+            urls = _aggregate_photo_urls(groups)[:MAX_PHOTOS_PER_PRODUCT]
+            used_ids.add(target_id)
+            jobs.append((reference, "MAIN", target_id, urls))
             continue
 
         if not candidates:
             errors.append(f"{reference} : fiche EFashion introuvable.")
             continue
 
+        # tailles / une seule fiche : photos sur cette fiche (pas un dump multi-couleurs
+        # sur une « principale » parmi plusieurs fiches couleurs).
+        if single_fiche_id is not None:
+            urls = _aggregate_photo_urls(groups)[:MAX_PHOTOS_PER_PRODUCT]
+            used_ids.add(single_fiche_id)
+            jobs.append((reference, "MAIN", single_fiche_id, urls))
+            continue
+
+        # Mode couleurs : 1 couleur → 1 fiche, photos de CETTE couleur seulement.
         for color_label, urls in groups:
             product_id = _find_product_id_for_color(ef_products, reference, color_label)
             if product_id is None or product_id in used_ids:
-                unmatched.append((reference, color_label or "DEFAULT", urls[:MAX_PHOTOS_PER_PRODUCT]))
+                unmatched.append(
+                    (reference, color_label or "DEFAULT", urls[:MAX_PHOTOS_PER_PRODUCT])
+                )
                 continue
             used_ids.add(product_id)
-            jobs.append((reference, color_label or "DEFAULT", product_id, urls[:MAX_PHOTOS_PER_PRODUCT]))
+            jobs.append(
+                (reference, color_label or "DEFAULT", product_id, urls[:MAX_PHOTOS_PER_PRODUCT])
+            )
+
+        # Fiches EFashion restantes (ex. principale après bascule rupture) :
+        # uniquement les photos de la couleur de cette fiche — jamais l'agrégat.
+        leftover = [
+            item
+            for item in candidates
+            if item.get("id") is not None and int(item["id"]) not in used_ids
+        ]
+        leftover.sort(
+            key=lambda item: (0 if item.get("main") else 1, str(item.get("reference") or ""))
+        )
+        for item in leftover:
+            product_id = int(item["id"])
+            color_hint = _extract_efashion_color(
+                str(item.get("reference") or ""),
+                str(item.get("referenceBase") or ""),
+            )
+            urls = _urls_for_color_label(groups, color_hint) if color_hint else []
+            if not urls:
+                # Pas de photos pour cette couleur → on n'injecte pas les autres.
+                continue
+            used_ids.add(product_id)
+            jobs.append((reference, color_hint or "SECONDARY", product_id, urls))
 
     if unmatched:
         paired = _pair_remaining_by_order(unmatched, ef_products, used_ids)
