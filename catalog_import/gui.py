@@ -471,7 +471,7 @@ class Worker(QObject):
                 )
                 if not products:
                     raise PfsApiError(
-                        "Aucun produit actif trouvé sur votre compte source."
+                        "Aucun produit trouvé sur votre compte source."
                     )
                 self.products_ready.emit(products, raw_pages, raw_variant_pages)
 
@@ -1949,8 +1949,11 @@ class CatalogDesktopApp(QMainWindow):
             (
                 f"Êtes-vous sûr de vouloir envoyer {count} produit(s) "
                 f"vers le catalogue ?\n\n"
-                "⚠️ Les produits seront mis en ligne et activés immédiatement "
-                "Ils seront visibles sur le catalogue "
+                "Les produits seront importés sur EFashion avec leurs photos.\n"
+                "• Actifs (READY_FOR_SALE) → en ligne, Visible coché\n"
+                "• Brouillons source (NEW) → brouillon EFashion\n"
+                "• Archivés / désactivés → hors ligne, Visible décoché\n"
+                "• Rupture stock → stock 0 par couleur\n\n"
                 "Vérifiez bien les informations avant de confirmer."
             ),
             QMessageBox.Yes | QMessageBox.No,
@@ -2011,9 +2014,16 @@ class CatalogDesktopApp(QMainWindow):
             "Mettre à jour",
             (
                 f"Mettre à jour {count} produit(s) déjà en ligne ?\n\n"
-                "Seront synchronisés depuis le compte source : prix, poids, catégorie, "
-                "collection, provenance et descriptions (FR/EN/IT/ES/DE).\n\n"
-                "Les infos actuelles sur EFashion seront écrasées pour ces champs."
+                "Refresh complet depuis le compte source :\n"
+                "• prix, poids, marque, catégorie, collection, provenance, pack, "
+                "déclinaison, dimensions, descriptions\n"
+                "• nouvelles couleurs / variantes (+ photos)\n"
+                "• refresh des photos (remplacement)\n"
+                "• stock (rupture + quantités), visibilité, couleur principale\n"
+                "• composition matières\n"
+                "• couleurs disparues côté source → suppression EFashion\n"
+                "• création des fiches manquantes\n\n"
+                "Les données EFashion concernées seront écrasées / resynchronisées."
             ),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
@@ -2171,11 +2181,12 @@ class CatalogDesktopApp(QMainWindow):
                 "Créer les produits",
                 message
                 or (
-                    f"{count} produit(s) envoyé(s) et mis en ligne.\n\n"
-                    "Les fiches sont activées et visibles sur le catalogue.\n\n"
-                    "Les photos ont été uploadées.\n"
-                    "Merci de vérifier l'exactitude des informations dans le "
-                    "back-office si besoin."
+                    f"{count} produit(s) envoyé(s) sur EFashion.\n\n"
+                    "Actifs → en ligne (Visible coché)\n"
+                    "NEW → brouillon\n"
+                    "Archivés → hors ligne (Visible décoché)\n"
+                    "Ruptures → stock 0 si détecté.\n\n"
+                    "Merci de vérifier l'exactitude des informations si besoin."
                 ),
             )
         if count > 0:

@@ -187,6 +187,7 @@ class EfashionClient:
               reference_base
               main
               premel
+              visible
               prix
               poids
             }
@@ -241,6 +242,7 @@ class EfashionClient:
             id_collection
             id_provenance
             main
+            visible
           }
         }
         """
@@ -346,6 +348,466 @@ class EfashionClient:
             },
         )
         return int(data.get("publishBrouillonBulk") or 0)
+
+    def soft_delete_produits(self, product_ids: list[int]) -> bool:
+        """Soft-delete EFashion (supprimer=1), comme le back-office vendeur."""
+        if not product_ids:
+            return True
+        unique = sorted({int(pid) for pid in product_ids})
+        mutation = """
+        mutation SoftDeleteProduits($ids: [Int!]!) {
+          softDeleteProduits(ids: $ids)
+        }
+        """
+        data = self.graphql(mutation, {"ids": unique})
+        return bool(data.get("softDeleteProduits"))
+
+    def set_produits_visible(self, product_ids: list[int], *, visible: bool) -> None:
+        """Coche/décoche la case Visible (hors ligne = visible false)."""
+        if not product_ids:
+            return
+        unique_ids = sorted({int(pid) for pid in product_ids})
+        mutation = """
+        mutation SetProduitsVisible($ids: [Int!]!, $visible: Boolean!) {
+          setProduitsVisible(ids: $ids, visible: $visible)
+        }
+        """
+        try:
+            self.graphql(
+                mutation,
+                {
+                    "ids": unique_ids,
+                    "visible": visible,
+                },
+            )
+            return
+        except EfashionApiError:
+            # Fallback produit par produit (même effet sur la case Visible).
+            errors: list[str] = []
+            for product_id in unique_ids:
+                try:
+                    self.update_produit(product_id, {"visible": visible})
+                except EfashionApiError as exc:
+                    errors.append(f"{product_id}: {exc}")
+            if errors:
+                raise EfashionApiError(
+                    "Impossible de mettre à jour la visibilité : "
+                    + " ; ".join(errors[:4])
+                ) from None
+
+    def find_products_by_reference(self, reference: str) -> list[dict[str, Any]]:
+        """Fiches en ligne pour une référence (principale + couleurs), clés normalisées."""
+        reference = str(reference or "").strip()
+        if not reference or self.session.id_vendeur is None:
+            return []
+        query = """
+        query GetProductsPage($filter: FilterProduitInput!) {
+          productsPage(filter: $filter) {
+            items {
+              id_produit
+              reference
+              reference_base
+              main
+              visible
+            }
+            total
+          }
+        }
+        """
+        data = self.graphql(
+            query,
+            {
+                "filter": {
+                    "id_vendeur": int(self.session.id_vendeur),
+                    "reference": reference,
+                    "premelFilter": "en_ligne",
+                    "take": 100,
+                    "skip": 0,
+                    "orderBy": "reference",
+                    "orderDir": "ASC",
+                }
+            },
+        )
+        page = data.get("productsPage") if isinstance(data, dict) else None
+        items = page.get("items") if isinstance(page, dict) else None
+        if not isinstance(items, list):
+            return []
+
+        results: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        for item in items:
+            if not isinstance(item, dict) or item.get("id_produit") is None:
+                continue
+            ref = str(item.get("reference") or "").strip()
+            ref_base = str(item.get("reference_base") or "").strip()
+            if ref != reference and ref_base != reference:
+                if not (
+                    ref.startswith(reference + "-")
+                    or ref_base.startswith(reference + "-")
+                ):
+                    continue
+            product_id = int(item["id_produit"])
+            if product_id in seen:
+                continue
+            seen.add(product_id)
+            results.append(
+                {
+                    "id": product_id,
+                    "id_produit": product_id,
+                    "reference": ref,
+                    "referenceBase": ref_base,
+                    "reference_base": ref_base,
+                    "main": bool(item.get("main")),
+                    "visible": item.get("visible"),
+                }
+            )
+        return results
+
+    def find_product_ids_by_reference(self, reference: str) -> list[int]:
+        """Tous les id_produit en ligne pour une référence (toutes couleurs)."""
+        return [
+            int(item["id"])
+            for item in self.find_products_by_reference(reference)
+            if item.get("id") is not None
+        ]
+
+    def duplicate_with_new_color(
+        self,
+        id_produit: int,
+        *,
+        couleur_id: int,
+        couleur_name: str,
+    ) -> dict[str, Any]:
+        """Crée une variante secondaire (main=0) avec une nouvelle couleur."""
+        mutation = """
+        mutation DuplicateWithNewColor(
+          $idProduit: Int!
+          $couleurId: Int!
+          $couleurName: String!
+        ) {
+          duplicateWithNewColor(
+            idProduit: $idProduit
+            couleurId: $couleurId
+            couleurName: $couleurName
+          ) {
+            id_produit
+            reference
+            reference_base
+            main
+            visible
+            premel
+          }
+        }
+        """
+        data = self.graphql(
+            mutation,
+            {
+                "idProduit": int(id_produit),
+                "couleurId": int(couleur_id),
+                "couleurName": str(couleur_name),
+            },
+        )
+        result = data.get("duplicateWithNewColor")
+        if not isinstance(result, dict) or result.get("id_produit") is None:
+            raise EfashionApiError("Réponse duplicateWithNewColor invalide.")
+        return result
+
+    def create_produit_stock(
+        self,
+        id_produit: int,
+        *,
+        id_couleur: int,
+        value: int,
+        taille: str | None = None,
+    ) -> None:
+        mutation = """
+        mutation CreateProduitStock($input: CreateProduitStockInput!) {
+          createProduitStock(input: $input) {
+            id_produit_stock
+          }
+        }
+        """
+        payload: dict[str, Any] = {
+            "id_produit": int(id_produit),
+            "id_couleur": int(id_couleur),
+            "value": int(value),
+        }
+        if taille:
+            payload["taille"] = taille
+        self.graphql(mutation, {"input": payload})
+
+    def list_produit_stocks(self, id_produit: int) -> list[dict[str, Any]]:
+        query = """
+        query ProduitsStockPage($filter: FilterProduitStockInput!) {
+          produitsStockPage(filter: $filter) {
+            items {
+              id_produit_stock
+              id_produit
+              id_couleur
+              value
+              taille
+            }
+            total
+          }
+        }
+        """
+        data = self.graphql(
+            query,
+            {
+                "filter": {
+                    "id_produit": int(id_produit),
+                    "take": 200,
+                    "skip": 0,
+                }
+            },
+        )
+        page = data.get("produitsStockPage") if isinstance(data, dict) else None
+        items = page.get("items") if isinstance(page, dict) else None
+        if not isinstance(items, list):
+            return []
+        return [item for item in items if isinstance(item, dict)]
+
+    def update_produit_stock(
+        self,
+        id_produit_stock: int,
+        *,
+        value: int,
+        id_couleur: int | None = None,
+        taille: str | None = None,
+    ) -> None:
+        mutation = """
+        mutation UpdateProduitStock($input: UpdateProduitStockInput!) {
+          updateProduitStock(input: $input) {
+            id_produit_stock
+            value
+          }
+        }
+        """
+        payload: dict[str, Any] = {
+            "id_produit_stock": int(id_produit_stock),
+            "value": int(value),
+        }
+        if id_couleur is not None:
+            payload["id_couleur"] = int(id_couleur)
+        if taille is not None:
+            payload["taille"] = taille
+        self.graphql(mutation, {"input": payload})
+
+    def upsert_produit_stock(
+        self,
+        id_produit: int,
+        *,
+        id_couleur: int,
+        value: int,
+        taille: str | None = None,
+    ) -> None:
+        """Crée ou met à jour la ligne stock (couleur ± taille)."""
+        existing = self.list_produit_stocks(id_produit)
+        taille_norm = (taille or "").strip() or None
+        match_id = None
+        for row in existing:
+            if int(row.get("id_couleur") or 0) != int(id_couleur):
+                continue
+            row_taille = str(row.get("taille") or "").strip() or None
+            if row_taille == taille_norm:
+                match_id = row.get("id_produit_stock")
+                break
+        if match_id is not None:
+            self.update_produit_stock(int(match_id), value=int(value))
+            return
+        self.create_produit_stock(
+            id_produit,
+            id_couleur=int(id_couleur),
+            value=int(value),
+            taille=taille_norm,
+        )
+
+    def list_produit_compositions(self, id_produit: int) -> list[dict[str, Any]]:
+        query = """
+        query ProduitsCompositionsPage($filter: FilterProduitCompositionInput!) {
+          produitsCompositionsPage(filter: $filter) {
+            items {
+              id_produit_composition
+              id_produit
+              id_composition
+              id_composition_localisation
+              value
+            }
+            total
+          }
+        }
+        """
+        data = self.graphql(
+            query,
+            {
+                "filter": {
+                    "id_produit": int(id_produit),
+                    "take": 100,
+                    "skip": 0,
+                }
+            },
+        )
+        page = (
+            data.get("produitsCompositionsPage") if isinstance(data, dict) else None
+        )
+        items = page.get("items") if isinstance(page, dict) else None
+        if not isinstance(items, list):
+            return []
+        return [item for item in items if isinstance(item, dict)]
+
+    def remove_produit_composition(self, id_produit_composition: int) -> bool:
+        mutation = """
+        mutation RemoveProduitComposition($id: Int!) {
+          removeProduitComposition(id: $id)
+        }
+        """
+        data = self.graphql(mutation, {"id": int(id_produit_composition)})
+        return bool(data.get("removeProduitComposition"))
+
+    def create_produit_composition(
+        self,
+        id_produit: int,
+        *,
+        id_composition: int,
+        id_composition_localisation: int,
+        value: float,
+    ) -> None:
+        mutation = """
+        mutation CreateProduitComposition($input: CreateProduitCompositionInput!) {
+          createProduitComposition(input: $input) {
+            id_produit_composition
+          }
+        }
+        """
+        self.graphql(
+            mutation,
+            {
+                "input": {
+                    "id_produit": int(id_produit),
+                    "id_composition": int(id_composition),
+                    "id_composition_localisation": int(id_composition_localisation),
+                    "value": float(value),
+                }
+            },
+        )
+
+    def replace_produit_compositions(
+        self,
+        id_produit: int,
+        compositions: list[dict[str, Any]],
+    ) -> None:
+        """Remplace toute la composition d'une fiche."""
+        for row in self.list_produit_compositions(id_produit):
+            comp_id = row.get("id_produit_composition")
+            if comp_id is None:
+                continue
+            try:
+                self.remove_produit_composition(int(comp_id))
+            except EfashionApiError:
+                continue
+        for item in compositions:
+            if not isinstance(item, dict):
+                continue
+            id_composition = item.get("id_composition")
+            localisation = item.get("localisation")
+            pourcentage = item.get("pourcentage", item.get("value"))
+            if id_composition is None or localisation in (None, ""):
+                continue
+            try:
+                loc_id = int(localisation)
+                pct = float(pourcentage if pourcentage is not None else 100)
+            except (TypeError, ValueError):
+                continue
+            self.create_produit_composition(
+                id_produit,
+                id_composition=int(id_composition),
+                id_composition_localisation=loc_id,
+                value=pct,
+            )
+
+    def get_product_photo_urls(self, product_id: int) -> list[str]:
+        """URLs publiques des photos produit (ordre d'affichage)."""
+        url = (
+            f"{EFASHION_REST_BASE_URL.rstrip('/')}"
+            f"/api/product-photos/{int(product_id)}"
+        )
+        response = self._client.get(url)
+        if response.status_code == 401:
+            raise EfashionApiError(
+                "Session EFashion expirée ou non autorisée. Reconnectez-vous."
+            )
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise EfashionApiError("Réponse product-photos invalide.") from exc
+        if response.status_code >= 400 or not (
+            isinstance(body, dict) and body.get("success")
+        ):
+            message = body.get("message") if isinstance(body, dict) else None
+            raise EfashionApiError(str(message or "Impossible de lister les photos."))
+        photos = body.get("photos") if isinstance(body, dict) else None
+        if not isinstance(photos, list):
+            return []
+        return [str(item) for item in photos if item]
+
+    def delete_product_photo(self, product_id: int, filename: str) -> None:
+        """Supprime une photo produit (toutes tailles S3)."""
+        filename = str(filename or "").strip()
+        if not filename:
+            return
+        # Ne garder que le nom de fichier
+        if "/" in filename:
+            filename = filename.rsplit("/", 1)[-1]
+        self.post_rest(
+            "/api/product-photo/delete",
+            {"productId": str(int(product_id)), "filename": filename},
+        )
+
+    def clear_product_photos(self, product_id: int) -> int:
+        """Supprime toutes les photos d'une fiche. Retourne le nombre supprimé."""
+        urls = self.get_product_photo_urls(product_id)
+        deleted = 0
+        for url in urls:
+            name = str(url).rsplit("/", 1)[-1].split("?", 1)[0]
+            if not name:
+                continue
+            try:
+                self.delete_product_photo(product_id, name)
+                deleted += 1
+            except EfashionApiError:
+                continue
+        return deleted
+
+    def replace_product_photos(
+        self,
+        product_id: int,
+        files: list[tuple[str, bytes, str]],
+    ) -> dict[str, Any]:
+        """Efface les photos existantes puis upload le nouveau jeu PFS."""
+        self.clear_product_photos(product_id)
+        if not files:
+            return {"success": True, "cleared_only": True}
+        return self.upload_product_photos(product_id, files)
+
+    def toggle_main_product(
+        self, product_id: int, *, apply_offline_rule: bool = False
+    ) -> bool:
+        mutation = """
+        mutation ToggleMainProduct($idProduit: Int!, $applyOfflineRule: Boolean) {
+          toggleMainProduct(
+            idProduit: $idProduit
+            applyOfflineRule: $applyOfflineRule
+          )
+        }
+        """
+        data = self.graphql(
+            mutation,
+            {
+                "idProduit": int(product_id),
+                "applyOfflineRule": bool(apply_offline_rule),
+            },
+        )
+        return bool(data.get("toggleMainProduct"))
 
     def upload_product_photos(
         self,

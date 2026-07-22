@@ -8,12 +8,17 @@ from .category_mapping import CategoryMappingStore, mapping_key_for_product
 from .efashion_client import EfashionApiError, EfashionClient
 from .shoe_dimensions import is_shoe_category, resolve_mel_dimensions
 from .pfs_client import (
+    efashion_mel_stock,
     infer_vendu_par_label,
+    mel_rupture_stock_by_color,
+    mel_rupture_taille_stocks,
     pack_color_labels,
     pack_quantities_by_size,
     pack_quantities_single_color_pack,
+    product_default_color_label,
     product_weight_kg,
     resolve_efashion_vendu_par,
+    resolve_main_color_label,
 )
 
 
@@ -178,9 +183,10 @@ class MelMapper:
         category_id = self._resolve_category(product)
         collection_id = self._resolve_collection(product)
         provenance_id = self._resolve_provenance(product)
-        colors = self._resolve_colors(product)
-        compositions = self._resolve_compositions(product, str(category_id))
         vendu_par = self._resolve_vendu_par(product)
+        colors = self._resolve_colors(product)
+        self._apply_mel_stock_to_colors(product, colors, vendu_par)
+        compositions = self._resolve_compositions(product, str(category_id))
         declinaison_id = self._ensure_declinaison(product)
         pack_id = "" if vendu_par == "tailles" else self._ensure_pack(product)
         weight = product_weight_kg(product)
@@ -208,7 +214,7 @@ class MelMapper:
             "paysOrigine": str(provenance_id),
             "taillePaquet": str(declinaison_id),
             "quantitePaquet": str(pack_id) if pack_id else "",
-            "stock": "",
+            "stock": efashion_mel_stock(product),
             "prix": str(price),
             "prixReduit": "",
             "dateRemise": "",
@@ -373,8 +379,28 @@ class MelMapper:
                 f"{_first_str(product.get('reference'))} : aucune couleur trouvée."
             )
 
+        # Si la principale PFS est indisponible → bascule une secondaire active en main
+        main_label = resolve_main_color_label(product, names)
+        ordered_names = list(names)
+        if main_label:
+            ordered_names = [main_label] + [
+                name for name in names if _normalize(name) != _normalize(main_label)
+            ]
+
+        preferred = product_default_color_label(product)
+        reference = _first_str(product.get("reference"))
+        if (
+            preferred
+            and main_label
+            and _normalize(preferred) != _normalize(main_label)
+        ):
+            self.created_notes.append(
+                f"{reference} : principale « {preferred} » indisponible "
+                f"→ « {main_label} » passée en principale"
+            )
+
         resolved: list[dict[str, Any]] = []
-        for index, name in enumerate(names):
+        for index, name in enumerate(ordered_names):
             color_id, color_label = self._ensure_color(name)
             resolved.append(
                 {
@@ -384,6 +410,55 @@ class MelMapper:
                 }
             )
         return resolved
+
+    def _color_keys(self, label: str) -> set[str]:
+        """Clés normalisées FR/EN pour matcher une couleur (Noir ↔ BLACK)."""
+        keys = {_normalize(label)}
+        upper = label.strip().upper()
+        for alias in PFS_COLOR_ALIASES.get(upper, []):
+            keys.add(_normalize(alias))
+        for pfs_key, aliases in PFS_COLOR_ALIASES.items():
+            bucket = {_normalize(pfs_key), *(_normalize(a) for a in aliases)}
+            if keys & bucket:
+                keys |= bucket
+        return {k for k in keys if k}
+
+    def _apply_mel_stock_to_colors(
+        self,
+        product: dict[str, Any],
+        colors: list[dict[str, Any]],
+        vendu_par: str,
+    ) -> None:
+        reference = _first_str(product.get("reference"))
+        if vendu_par == "couleurs":
+            rupture_keys: set[str] = set()
+            for label in mel_rupture_stock_by_color(product):
+                rupture_keys |= self._color_keys(label)
+            for couleur in colors:
+                nom = _first_str(couleur.get("nom"))
+                if nom and (self._color_keys(nom) & rupture_keys):
+                    couleur["stock"] = 0
+                    self.created_notes.append(f"{reference} : {nom} en rupture → stock 0")
+        elif vendu_par == "tailles":
+            by_color_keys: list[tuple[set[str], list[dict[str, Any]]]] = [
+                (self._color_keys(label), stocks)
+                for label, stocks in mel_rupture_taille_stocks(product).items()
+            ]
+            for couleur in colors:
+                nom = _first_str(couleur.get("nom"))
+                if not nom:
+                    continue
+                nom_keys = self._color_keys(nom)
+                stocks = next(
+                    (entries for keys, entries in by_color_keys if keys & nom_keys),
+                    None,
+                )
+                if stocks:
+                    couleur["tailleStocks"] = stocks
+                    sizes = ", ".join(str(entry.get("taille") or "") for entry in stocks)
+                    self.created_notes.append(
+                        f"{reference} : {nom} ({sizes}) en rupture → stock 0"
+                    )
 
     def _ensure_color(self, raw_name: str) -> tuple[int, str]:
         couleurs = self.reference_data.get("couleurs") or []
