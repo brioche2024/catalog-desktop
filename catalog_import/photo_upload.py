@@ -89,20 +89,34 @@ def download_image(url: str) -> tuple[bytes, str, str]:
     return response.content, filename, content_type
 
 
+def _efashion_candidates_for_reference(
+    ef_products: list[dict[str, Any]],
+    reference_base: str,
+) -> list[dict[str, Any]]:
+    base_norm = _normalize(reference_base)
+    return [
+        item
+        for item in ef_products
+        if _normalize(str(item.get("referenceBase") or "")) == base_norm
+        or _normalize(str(item.get("reference") or "")).startswith(base_norm)
+    ]
+
+
+def _single_fiche_product_id(candidates: list[dict[str, Any]]) -> int | None:
+    """Retourne l'id de la fiche unique (melangees, tailles, couleur unique…)."""
+    if len(candidates) != 1:
+        return None
+    product_id = candidates[0].get("id")
+    return int(product_id) if product_id is not None else None
+
+
 def _find_product_id_for_color(
     ef_products: list[dict[str, Any]],
     reference_base: str,
     color_label: str,
 ) -> int | None:
     wanted = _color_aliases(color_label)
-    base_norm = _normalize(reference_base)
-
-    candidates = [
-        item
-        for item in ef_products
-        if _normalize(str(item.get("referenceBase") or "")) == base_norm
-        or _normalize(str(item.get("reference") or "")).startswith(base_norm)
-    ]
+    candidates = _efashion_candidates_for_reference(ef_products, reference_base)
     if not candidates:
         return None
 
@@ -138,6 +152,19 @@ def _find_product_id_for_color(
     if len(candidates) == 1 and candidates[0].get("id") is not None:
         return int(candidates[0]["id"])
     return None
+
+
+def _aggregate_photo_urls(groups: list[tuple[str, list[str]]]) -> list[str]:
+    seen: set[str] = set()
+    urls: list[str] = []
+    for _color_label, color_urls in groups:
+        for url in color_urls:
+            if url not in seen:
+                seen.add(url)
+                urls.append(url)
+            if len(urls) >= MAX_PHOTOS_PER_PRODUCT:
+                return urls
+    return urls
 
 
 def _pair_remaining_by_order(
@@ -221,6 +248,20 @@ def upload_pfs_photos_to_efashion(
         groups = product_images_by_color(product)
         if not groups:
             errors.append(f"{reference} : aucune photo source.")
+            continue
+
+        candidates = _efashion_candidates_for_reference(ef_products, reference)
+        single_fiche_id = _single_fiche_product_id(candidates)
+        if single_fiche_id is not None:
+            # Une seule fiche EFashion (melangees, tailles, 1 couleur…) :
+            # toutes les photos PFS vont dessus.
+            urls = _aggregate_photo_urls(groups)
+            used_ids.add(single_fiche_id)
+            jobs.append((reference, "MAIN", single_fiche_id, urls))
+            continue
+
+        if not candidates:
+            errors.append(f"{reference} : fiche EFashion introuvable.")
             continue
 
         for color_label, urls in groups:

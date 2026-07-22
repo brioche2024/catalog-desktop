@@ -6,10 +6,12 @@ from typing import Any
 
 from .category_mapping import CategoryMappingStore, mapping_key_for_product
 from .efashion_client import EfashionApiError, EfashionClient
+from .shoe_dimensions import is_shoe_category, resolve_mel_dimensions
 from .pfs_client import (
     infer_vendu_par_label,
     pack_color_labels,
     pack_quantities_by_size,
+    pack_quantities_single_color_pack,
     product_weight_kg,
     resolve_efashion_vendu_par,
 )
@@ -20,6 +22,10 @@ class MelMappingError(Exception):
 
 
 DEFAULT_WEIGHT_KG = 0.05
+SHOE_COMPOSITION_ZONES = ("Tige", "Doublure", "Semelle")
+# IDs EFashion des localisations chaussures (Tige, Doublure, Semelle).
+SHOE_COMPOSITION_ZONE_IDS = ("1", "2", "3")
+DEFAULT_SHOE_MATERIAL = "Autre matériau"
 
 
 def _localized_label(value: Any, lang: str = "fr") -> str:
@@ -173,7 +179,7 @@ class MelMapper:
         collection_id = self._resolve_collection(product)
         provenance_id = self._resolve_provenance(product)
         colors = self._resolve_colors(product)
-        compositions = self._resolve_compositions(product)
+        compositions = self._resolve_compositions(product, str(category_id))
         vendu_par = self._resolve_vendu_par(product)
         declinaison_id = self._ensure_declinaison(product)
         pack_id = "" if vendu_par == "tailles" else self._ensure_pack(product)
@@ -185,6 +191,12 @@ class MelMapper:
             )
 
         description = _product_descriptions(product)
+        dimensions = resolve_mel_dimensions(
+            product,
+            str(category_id),
+            reference=reference,
+            notes=self.created_notes,
+        )
 
         return {
             "reference": reference,
@@ -201,7 +213,7 @@ class MelMapper:
             "prixReduit": "",
             "dateRemise": "",
             "pourcentageRemise": "",
-            "dimensions": "",
+            "dimensions": dimensions,
             "minimumCommande": "1",
             "couleurs": colors,
             "descriptionFr": description["descriptionFr"],
@@ -449,7 +461,68 @@ class MelMapper:
                 if "duplicate" not in str(exc).lower() and "unique" not in str(exc).lower():
                     raise
 
-    def _resolve_compositions(self, product: dict[str, Any]) -> list[dict[str, Any]]:
+    def _resolve_shoe_compositions(
+        self, product: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        reference = _first_str(product.get("reference"))
+        compositions_ref = [
+            item
+            for item in (self.reference_data.get("compositions") or [])
+            if item.get("type") == "composition"
+        ]
+        localisations_ref = [
+            item
+            for item in (self.reference_data.get("compositions") or [])
+            if item.get("type") == "localisation"
+        ]
+
+        material = _match_by_label(
+            compositions_ref, DEFAULT_SHOE_MATERIAL, "libelle"
+        ) or _match_by_label(compositions_ref, "Autre materiau", "libelle")
+        if not material:
+            raise MelMappingError(
+                "Matière « Autre matériau » introuvable dans EFashion."
+            )
+
+        result: list[dict[str, Any]] = []
+        localisation_by_id = {
+            str(item.get("id")): item
+            for item in localisations_ref
+            if item.get("id") is not None
+        }
+        for zone_id, zone_label in zip(
+            SHOE_COMPOSITION_ZONE_IDS, SHOE_COMPOSITION_ZONES
+        ):
+            localisation = localisation_by_id.get(zone_id)
+            if not localisation:
+                localisation = _match_by_label(
+                    localisations_ref, zone_label, "libelle", exact_only=True
+                )
+            if not localisation:
+                raise MelMappingError(
+                    f"Localisation composition « {zone_label} » introuvable dans EFashion."
+                )
+            result.append(
+                {
+                    "id_composition": int(material["id"]),
+                    "materiau": _first_str(material.get("libelle"), DEFAULT_SHOE_MATERIAL),
+                    "localisation": str(localisation["id"]),
+                    "pourcentage": None,
+                }
+            )
+
+        self.created_notes.append(
+            f"{reference or '?'} : composition chaussures "
+            f"→ défaut {DEFAULT_SHOE_MATERIAL} (Tige, Doublure, Semelle)"
+        )
+        return result
+
+    def _resolve_compositions(
+        self, product: dict[str, Any], category_id: str
+    ) -> list[dict[str, Any]]:
+        if is_shoe_category(category_id):
+            return self._resolve_shoe_compositions(product)
+
         materials = product.get("material_composition")
         if not isinstance(materials, list) or not materials:
             raise MelMappingError(
@@ -589,18 +662,22 @@ class MelMapper:
             aggregated = pack_quantities_by_size(product, sizes)
             if aggregated and any(qty > 0 for qty in aggregated):
                 return aggregated
+        elif vendu_par == "couleurs":
+            single = pack_quantities_single_color_pack(product, sizes)
+            if single and any(qty > 0 for qty in single):
+                return single
 
-            variants = product.get("variants") if isinstance(product.get("variants"), list) else []
-            for variant in variants:
-                if not isinstance(variant, dict):
-                    continue
-                if str(variant.get("type") or "").upper() != "PACK":
-                    continue
-                pieces = variant.get("pieces")
-                if isinstance(pieces, (int, float)) and pieces > 0:
-                    return [int(pieces)]
+        variants = product.get("variants") if isinstance(product.get("variants"), list) else []
+        for variant in variants:
+            if not isinstance(variant, dict):
+                continue
+            if str(variant.get("type") or "").upper() != "PACK":
+                continue
+            pieces = variant.get("pieces")
+            if isinstance(pieces, (int, float)) and pieces > 0:
+                return [int(pieces)]
 
-        # Couleurs (ou fallback) → pack unitaire
+        # Fallback → pack unitaire
         return [1]
 
     def _ensure_pack(self, product: dict[str, Any]) -> int:

@@ -383,6 +383,43 @@ def _item_color_and_sizes(
     return colors, sizes
 
 
+def _colors_in_pack_variant(variant: dict[str, Any]) -> set[str]:
+    colors: set[str] = set()
+    for pack in variant.get("packs") or []:
+        if not isinstance(pack, dict):
+            continue
+        color_data = pack.get("color")
+        if not isinstance(color_data, dict):
+            continue
+        label = (
+            _localized_label(color_data.get("labels"))
+            or _first_str(color_data, "reference")
+            or ""
+        ).strip()
+        if label:
+            colors.add(label)
+    return colors
+
+
+def is_mixed_color_pack(product: dict[str, Any]) -> bool:
+    """
+    True si un paquet PFS mélange plusieurs couleurs (melangees).
+    False si chaque variant PACK est mono-couleur (couleurs + paquet ex. 3-3).
+    """
+    pack_variants = [
+        variant
+        for variant in _active_variants(product)
+        if _variant_type(variant) == "PACK"
+    ]
+    if not pack_variants:
+        return False
+
+    for variant in pack_variants:
+        if len(_colors_in_pack_variant(variant)) > 1:
+            return True
+    return False
+
+
 def infer_vendu_par_label(product: dict[str, Any]) -> str:
     variants = _active_variants(product)
     if not variants:
@@ -395,7 +432,9 @@ def infer_vendu_par_label(product: dict[str, Any]) -> str:
     if has_item and has_pack:
         return "Mixte (unité + paquet)"
     if has_pack and not has_item:
-        return "Couleurs melangees"
+        if is_mixed_color_pack(product):
+            return "Couleurs melangees"
+        return "Couleurs"
 
     colors, sizes = _item_color_and_sizes(variants)
     if len(sizes) > 1:
@@ -476,6 +515,38 @@ def pack_quantities_by_size(
 
     order = sizes_order or size_order
     return [qty_by_size.get(size, 0) for size in order]
+
+
+def pack_quantities_single_color_pack(
+    product: dict[str, Any],
+    sizes_order: list[str] | None = None,
+) -> list[int] | None:
+    """
+    Quantités du paquet pour vendu à la couleur (premier variant PACK mono-couleur).
+    N'aggrège pas les couleurs entre variants (ex. Bleu 3-3 + Rouge 3-3 → 3-3, pas 6-6).
+    """
+    for variant in _active_variants(product):
+        if _variant_type(variant) != "PACK":
+            continue
+        qty_by_size: dict[str, int] = {}
+        size_order: list[str] = []
+        for pack in variant.get("packs") or []:
+            if not isinstance(pack, dict):
+                continue
+            for size_entry in pack.get("sizes") or []:
+                if not isinstance(size_entry, dict):
+                    continue
+                qty = size_entry.get("qty")
+                if not isinstance(qty, (int, float)) or qty <= 0:
+                    continue
+                size = _normalize_size(_first_str(size_entry, "size"))
+                qty_by_size[size] = qty_by_size.get(size, 0) + int(qty)
+                if size not in size_order:
+                    size_order.append(size)
+        if qty_by_size:
+            order = sizes_order or size_order
+            return [qty_by_size.get(size, 0) for size in order]
+    return None
 
 
 def catalog_presence_key(reference: str, vendu_par: str) -> str:
