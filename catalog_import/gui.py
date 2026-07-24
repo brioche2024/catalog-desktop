@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Qt, QUrl
-from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPixmap
+from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFont, QIcon, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QApplication,
@@ -29,6 +30,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .app_update import (
+    AppUpdateError,
+    apply_update_and_relaunch,
+    check_and_download_update,
+    is_frozen_app,
+)
 from .auth import AuthError, login_pfs
 from .category_mapping import (
     CategoryMappingEntry,
@@ -37,7 +44,13 @@ from .category_mapping import (
     children_of,
     pfs_category_label,
 )
-from .config import APP_NAME, APP_VERSION, ICON_ICNS, ICON_PNG
+from .config import (
+    APP_NAME,
+    APP_VERSION,
+    ICON_ICNS,
+    ICON_PNG,
+    UPDATE_CHECK_INTERVAL_MS,
+)
 from .mel_service import MelSyncError, send_products_to_efashion
 from .efashion_auth import EfashionAuthError, login_efashion
 from .efashion_client import EfashionApiError, EfashionClient
@@ -400,6 +413,27 @@ class CategoryMappingManagerDialog(QDialog):
         self._reload_table()
 
 
+class AppUpdateWorker(QObject):
+    """Check GitHub releases en arrière-plan (n'utilise pas le worker principal)."""
+
+    finished = Signal()
+    available = Signal(str, str, str)  # version, file_path, html_url
+    failed = Signal(str)
+
+    def run(self) -> None:
+        try:
+            result = check_and_download_update()
+            if result is not None:
+                release, path = result
+                self.available.emit(release.version, str(path), release.html_url)
+        except AppUpdateError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+        finally:
+            self.finished.emit()
+
+
 class Worker(QObject):
     finished = Signal()
     failed = Signal(str)
@@ -583,10 +617,15 @@ class CatalogDesktopApp(QMainWindow):
         self._net_manager = QNetworkAccessManager(self)
         self._image_token = 0
         self._pending_replies: dict[QNetworkReply, tuple[int, ClickableLabel]] = {}
+        self._update_thread: QThread | None = None
+        self._update_worker: AppUpdateWorker | None = None
+        self._update_prompted_version: str | None = None
+        self._update_error_shown = False
 
         self._build_ui()
         self._apply_global_styles()
         self._show_screen()
+        self._start_update_scheduler()
 
     def _apply_global_styles(self) -> None:
         self.setStyleSheet(
@@ -1076,6 +1115,91 @@ class CatalogDesktopApp(QMainWindow):
         if self.app_session.efashion:
             lines.append(f"EFashion : {self.app_session.efashion.email}")
         self.status_label.setText("\n".join(lines))
+
+    def _start_update_scheduler(self) -> None:
+        self._update_timer = QTimer(self)
+        self._update_timer.setInterval(UPDATE_CHECK_INTERVAL_MS)
+        self._update_timer.timeout.connect(self._check_app_update)
+        self._update_timer.start()
+        QTimer.singleShot(2_000, self._check_app_update)
+
+    def _check_app_update(self) -> None:
+        if self._update_thread is not None and self._update_thread.isRunning():
+            return
+
+        worker = AppUpdateWorker()
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        worker.available.connect(self._on_app_update_available)
+        worker.failed.connect(self._on_app_update_failed)
+
+        def _clear() -> None:
+            if self._update_thread is thread:
+                self._update_thread = None
+                self._update_worker = None
+
+        thread.finished.connect(_clear)
+        self._update_thread = thread
+        self._update_worker = worker
+        thread.start()
+
+    def _on_app_update_failed(self, message: str) -> None:
+        self._append_log(f"Mise à jour app : {message}")
+        if self._update_error_shown:
+            return
+        self._update_error_shown = True
+        print(f"[auto-update] {message}", file=sys.stderr)
+
+    def _on_app_update_available(
+        self, version: str, file_path: str, _html_url: str
+    ) -> None:
+        if version == self._update_prompted_version:
+            return
+        self._update_prompted_version = version
+        self._append_log(f"Nouvelle version {version} téléchargée : {file_path}")
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Information)
+        box.setWindowTitle("Mise à jour disponible")
+        box.setText(
+            f"La version {version} est disponible "
+            f"(vous êtes en {APP_VERSION}).\n\n"
+            "L’application va se fermer, installer la nouvelle version, "
+            "puis se relancer."
+        )
+        box.setInformativeText(file_path)
+        install_btn = box.addButton("Installer et relancer", QMessageBox.AcceptRole)
+        box.addButton("Plus tard", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is not install_btn:
+            return
+
+        if not is_frozen_app():
+            QMessageBox.information(
+                self,
+                "Mise à jour",
+                "L’installation automatique ne fonctionne que depuis "
+                "l’application empaquetée (.app / .exe).\n\n"
+                f"Le zip est prêt ici :\n{file_path}",
+            )
+            folder = QUrl.fromLocalFile(str(Path(file_path).resolve().parent))
+            QDesktopServices.openUrl(folder)
+            return
+
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            apply_update_and_relaunch(Path(file_path))
+        except AppUpdateError as exc:
+            QMessageBox.critical(self, "Mise à jour", str(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        QApplication.instance().quit()
 
     def _append_log(self, message: str) -> None:
         return
