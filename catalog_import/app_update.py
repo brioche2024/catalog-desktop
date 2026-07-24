@@ -93,10 +93,8 @@ def resolve_update_target_path() -> Path | None:
         home_apps.mkdir(parents=True, exist_ok=True)
         return home_apps / target_name
 
-    if os.access(current.parent, os.W_OK):
     # Windows onedir
-    parent = current.parent
-    if os.access(parent, os.W_OK):
+    if os.access(current.parent, os.W_OK):
         return current
     local_apps = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_BUILD_NAME
     local_apps.mkdir(parents=True, exist_ok=True)
@@ -469,7 +467,6 @@ def apply_update_and_relaunch(zip_path: Path) -> Path:
     """
     Prépare la nouvelle version et lance un script d'installation détaché.
     Le caller doit quitter immédiatement après (os._exit).
-    Le caller doit quitter l'app immédiatement après (de préférence os._exit).
     Retourne le chemin d'installation cible.
     """
     install_path = resolve_update_target_path()
@@ -480,17 +477,6 @@ def apply_update_and_relaunch(zip_path: Path) -> Path:
         )
 
     current = current_install_path()
-    if current is not None and _is_app_translocated(current):
-        # Expliquer via le log : on ne peut pas patcher le volume Gatekeeper.
-        UPDATES_DIR.mkdir(parents=True, exist_ok=True)
-        note = UPDATES_DIR / "install.log"
-        note.write_text(
-            f"[update] running from App Translocation ({current}); "
-            f"installing to writable path {install_path}\n",
-            encoding="utf-8",
-        )
-
-    staged = stage_update_from_zip(Path(zip_path))
     UPDATES_DIR.mkdir(parents=True, exist_ok=True)
     log_path = UPDATES_DIR / "install.log"
     if current is not None and _is_app_translocated(current):
@@ -523,7 +509,6 @@ def apply_update_and_relaunch(zip_path: Path) -> Path:
         return install_path
 
     if sys.platform == "win32":
-    elif sys.platform == "win32":
         script = UPDATES_DIR / "install_update.ps1"
         _write_windows_installer(script)
         launch_after = str(Path(install_path) / f"{APP_BUILD_NAME}.exe")
