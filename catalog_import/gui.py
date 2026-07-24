@@ -1174,6 +1174,7 @@ class CatalogDesktopApp(QMainWindow):
                 and current is not None
                 and target.resolve() != current.resolve()
             ):
+                relocate_note = f"\n\nElle sera installée ici :\n{target}"
                 relocate_note = (
                     f"\n\nElle sera installée ici :\n{target}"
                 )
@@ -1215,6 +1216,7 @@ class CatalogDesktopApp(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
 
+        # Quit immédiat : sinon le script attend un PID qui ne meurt jamais.
         # Quitter immédiatement : sinon le script d'install attend un PID
         # qui ne meurt jamais (threads Qt encore actifs).
         os._exit(0)

@@ -72,15 +72,14 @@ def current_install_path() -> Path | None:
 
 
 def _is_app_translocated(path: Path) -> bool:
-    """Gatekeeper macOS exécute les .app non notarisés depuis un volume read-only."""
+    """Gatekeeper exécute les .app non notarisés depuis un volume read-only."""
     return "AppTranslocation" in str(path)
 
 
 def resolve_update_target_path() -> Path | None:
     """
-    Destination writable pour installer la nouvelle version.
-    Si l'app tourne sous App Translocation (Downloads, etc.), on installe
-    dans ~/Applications pour pouvoir remplacer et relancer.
+    Destination writable pour la nouvelle version.
+    Si App Translocation (Downloads) → ~/Applications.
     """
     current = current_install_path()
     if current is None:
@@ -88,14 +87,13 @@ def resolve_update_target_path() -> Path | None:
 
     if sys.platform == "darwin":
         target_name = f"{APP_BUILD_NAME}.app"
-        if not _is_app_translocated(current):
-            parent = current.parent
-            if os.access(parent, os.W_OK):
-                return current
+        if not _is_app_translocated(current) and os.access(current.parent, os.W_OK):
+            return current
         home_apps = Path.home() / "Applications"
         home_apps.mkdir(parents=True, exist_ok=True)
         return home_apps / target_name
 
+    if os.access(current.parent, os.W_OK):
     # Windows onedir
     parent = current.parent
     if os.access(parent, os.W_OK):
@@ -103,6 +101,35 @@ def resolve_update_target_path() -> Path | None:
     local_apps = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_BUILD_NAME
     local_apps.mkdir(parents=True, exist_ok=True)
     return local_apps
+
+
+def _fix_bundle_permissions(payload: Path) -> None:
+    """
+    zipfile perd souvent le bit +x → open échoue (Launchd error 111).
+    """
+    if sys.platform == "darwin":
+        macos_dir = payload / "Contents" / "MacOS"
+        if macos_dir.is_dir():
+            for item in macos_dir.iterdir():
+                if item.is_file():
+                    mode = item.stat().st_mode
+                    item.chmod(mode | 0o111)
+        for pattern in ("**/*.dylib", "**/*.so", "**/Python"):
+            for item in payload.glob(pattern):
+                if item.is_file():
+                    try:
+                        item.chmod(item.stat().st_mode | 0o111)
+                    except OSError:
+                        pass
+        return
+
+    # Windows onedir
+    exe = payload / f"{APP_BUILD_NAME}.exe"
+    if exe.is_file():
+        try:
+            exe.chmod(exe.stat().st_mode | 0o111)
+        except OSError:
+            pass
 
 
 def _platform_asset_markers() -> tuple[str, ...]:
@@ -329,6 +356,7 @@ def stage_update_from_zip(zip_path: Path) -> Path:
             shutil.rmtree(final)
         shutil.move(str(payload), str(final))
 
+    _fix_bundle_permissions(final)
     return final
 
 
@@ -350,6 +378,15 @@ for i in $(seq 1 300); do
 done
 sleep 1
 echo "[update] replace -> $TARGET"
+case "$TARGET" in
+  *AppTranslocation*)
+    TARGET="$HOME/Applications/GestionnaireCatalogue.app"
+    echo "[update] fallback target=$TARGET"
+    ;;
+esac
+mkdir -p "$(dirname "$TARGET")"
+rm -rf "$TARGET" 2>/dev/null || true
+if [ -e "$TARGET" ]; then
 mkdir -p "$(dirname "$TARGET")"
 # Ne jamais essayer d'écrire dans App Translocation (read-only)
 case "$TARGET" in
@@ -368,10 +405,25 @@ if [ -e "$TARGET" ]; then
   rm -rf "$TARGET" 2>/dev/null || true
 fi
 if ! mv "$STAGED" "$TARGET"; then
+  echo "[update] mv failed, cp -R"
   echo "[update] mv failed, trying cp -R"
   rm -rf "$TARGET"
   cp -R "$STAGED" "$TARGET"
   rm -rf "$STAGED"
+fi
+# Critique : bit +x perdu par zipfile
+chmod -R u+x "$TARGET/Contents/MacOS" 2>/dev/null || true
+find "$TARGET" -type f \\( -name '*.dylib' -o -name '*.so' -o -name 'Python' -o -name 'GestionnaireCatalogue' \\) -exec chmod u+x {} \\; 2>/dev/null || true
+xattr -cr "$TARGET" 2>/dev/null || true
+xattr -dr com.apple.quarantine "$TARGET" 2>/dev/null || true
+echo "[update] launch $TARGET"
+sleep 0.5
+# Prefer direct exec fallback if open fails
+if ! open "$TARGET"; then
+  echo "[update] open failed, trying binary"
+  BIN="$TARGET/Contents/MacOS/GestionnaireCatalogue"
+  chmod +x "$BIN" 2>/dev/null || true
+  nohup "$BIN" >/dev/null 2>&1 &
 fi
 xattr -cr "$TARGET" 2>/dev/null || true
 echo "[update] launch $TARGET"
@@ -395,7 +447,10 @@ def _write_windows_installer(script_path: Path) -> None:
 $ErrorActionPreference = 'Continue'
 function Write-Log($m) { Add-Content -Path $Log -Value ("[{0}] {1}" -f (Get-Date -Format o), $m) }
 Write-Log "wait pid=$ProcessId"
-while (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 400 }
+$deadline = (Get-Date).AddSeconds(120)
+while ((Get-Process -Id $ProcessId -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {
+  Start-Sleep -Milliseconds 400
+}
 Start-Sleep -Seconds 1
 Write-Log "replace $Target"
 if (Test-Path $Target) { Remove-Item -LiteralPath $Target -Recurse -Force }
@@ -413,6 +468,7 @@ Write-Log "done"
 def apply_update_and_relaunch(zip_path: Path) -> Path:
     """
     Prépare la nouvelle version et lance un script d'installation détaché.
+    Le caller doit quitter immédiatement après (os._exit).
     Le caller doit quitter l'app immédiatement après (de préférence os._exit).
     Retourne le chemin d'installation cible.
     """
@@ -437,6 +493,14 @@ def apply_update_and_relaunch(zip_path: Path) -> Path:
     staged = stage_update_from_zip(Path(zip_path))
     UPDATES_DIR.mkdir(parents=True, exist_ok=True)
     log_path = UPDATES_DIR / "install.log"
+    if current is not None and _is_app_translocated(current):
+        log_path.write_text(
+            f"[update] running from App Translocation ({current}); "
+            f"installing to writable path {install_path}\n",
+            encoding="utf-8",
+        )
+
+    staged = stage_update_from_zip(Path(zip_path))
     pid = os.getpid()
 
     if sys.platform == "darwin":
@@ -457,6 +521,8 @@ def apply_update_and_relaunch(zip_path: Path) -> Path:
             close_fds=True,
         )
         return install_path
+
+    if sys.platform == "win32":
     elif sys.platform == "win32":
         script = UPDATES_DIR / "install_update.ps1"
         _write_windows_installer(script)
@@ -490,4 +556,5 @@ def apply_update_and_relaunch(zip_path: Path) -> Path:
             stderr=subprocess.DEVNULL,
         )
         return install_path
+
     raise AppUpdateError("Plateforme non supportée pour l’install auto.")
