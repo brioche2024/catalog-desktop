@@ -28,9 +28,11 @@ from .photo_upload import (
     _aggregate_photo_urls,
     _color_aliases,
     _extract_efashion_color,
+    _filter_groups_for_product,
     _normalize,
     download_image,
     fetch_upload_products_for_shootings,
+    photo_urls_for_color,
     upload_pfs_photos_to_efashion,
 )
 from .session_store import EfashionSession, PfsSession
@@ -441,23 +443,6 @@ def _existing_efashion_color_keys(group: list[dict[str, Any]]) -> set[str]:
     return keys
 
 
-def _photo_urls_for_color(product: dict[str, Any], color_label: str) -> list[str]:
-    if not color_label:
-        return _aggregate_photo_urls(product_images_by_color(product))[
-            :MAX_PHOTOS_PER_PRODUCT
-        ]
-    wanted = _color_aliases(color_label)
-    for label, urls in product_images_by_color(product):
-        if not label:
-            continue
-        if _normalize(label) in wanted or (_color_aliases(label) & wanted):
-            return list(urls)[:MAX_PHOTOS_PER_PRODUCT]
-    groups = product_images_by_color(product)
-    if len(groups) == 1:
-        return list(groups[0][1])[:MAX_PHOTOS_PER_PRODUCT]
-    return []
-
-
 def _files_from_urls(
     reference: str, color_label: str, urls: list[str]
 ) -> list[tuple[str, bytes, str]]:
@@ -521,7 +506,7 @@ def _sync_missing_colors(
                 couleur_name=nom,
             )
             new_id = int(created["id_produit"])
-            urls = _photo_urls_for_color(product, nom)
+            urls = photo_urls_for_color(product, nom)
             if urls:
                 files = _files_from_urls(reference, nom, urls)
                 _upload_files(client, new_id, files)
@@ -624,13 +609,18 @@ def _refresh_all_photos(
             str(item.get("reference") or ""),
             str(item.get("referenceBase") or item.get("reference_base") or ""),
         )
-        if vendu_par == "melangees" or (len(group) == 1 and not ef_color):
-            urls = _aggregate_photo_urls(product_images_by_color(product))[
-                :MAX_PHOTOS_PER_PRODUCT
-            ]
+        if vendu_par == "melangees":
+            urls = _aggregate_photo_urls(
+                _filter_groups_for_product(product, product_images_by_color(product))
+            )[:MAX_PHOTOS_PER_PRODUCT]
+            label = "MAIN"
+        elif vendu_par == "tailles" and len(group) == 1 and not ef_color:
+            urls = _aggregate_photo_urls(
+                _filter_groups_for_product(product, product_images_by_color(product))
+            )[:MAX_PHOTOS_PER_PRODUCT]
             label = "MAIN"
         else:
-            urls = _photo_urls_for_color(product, ef_color)
+            urls = photo_urls_for_color(product, ef_color)
             label = ef_color or ("MAIN" if item.get("main") else "SECONDARY")
 
         if not urls:

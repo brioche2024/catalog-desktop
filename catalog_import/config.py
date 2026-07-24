@@ -27,6 +27,11 @@ else:
 
 SESSION_DIR = DATA_DIR / ".session"
 OUTPUT_DIR = DATA_DIR / "output"
+UPDATES_DIR = DATA_DIR / "updates"
+
+# Repo GitHub pour les releases (check auto au démarrage + périodique)
+GITHUB_REPO = "brioche2024/catalog-desktop"
+UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000  # 1 heure
 
 if _is_frozen():
     ASSETS_DIR = Path(getattr(sys, "_MEIPASS", BASE_DIR)) / "assets"

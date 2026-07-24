@@ -154,6 +154,84 @@ def _find_product_id_for_color(
     return None
 
 
+def _product_color_labels(product: dict[str, Any]) -> list[str]:
+    raw = str(product.get("colors") or product.get("couleurs") or "").strip()
+    if not raw:
+        return []
+    return [part.strip() for part in re.split(r"[;,]", raw) if part.strip()]
+
+
+def _filter_groups_for_product(
+    product: dict[str, Any],
+    groups: list[tuple[str, list[str]]],
+) -> list[tuple[str, list[str]]]:
+    """Limite les photos aux couleurs du produit (ex. pack split x4-REF)."""
+    wanted_labels = _product_color_labels(product)
+    if not wanted_labels:
+        return groups
+
+    wanted: set[str] = set()
+    for label in wanted_labels:
+        wanted |= _color_aliases(label)
+        wanted.add(_normalize(label))
+
+    filtered = [
+        (label, urls)
+        for label, urls in groups
+        if label and (_normalize(label) in wanted or (_color_aliases(label) & wanted))
+    ]
+    return filtered if filtered else groups
+
+
+def _resolve_single_couleur_photo_job(
+    product: dict[str, Any],
+    groups: list[tuple[str, list[str]]],
+    ef_item: dict[str, Any],
+) -> tuple[str, list[str]] | None:
+    """Photos pour une fiche unique en mode couleurs (jamais l'agrégat multi-couleurs)."""
+    color_hint = _extract_efashion_color(
+        str(ef_item.get("reference") or ""),
+        str(ef_item.get("referenceBase") or ""),
+    )
+    if color_hint:
+        urls = _urls_for_color_label(groups, color_hint)
+        if urls:
+            return color_hint, urls
+
+    if len(groups) == 1:
+        label, urls = groups[0]
+        if urls:
+            return label or "MAIN", list(urls)[:MAX_PHOTOS_PER_PRODUCT]
+
+    product_colors = _product_color_labels(product)
+    if len(product_colors) == 1:
+        urls = _urls_for_color_label(groups, product_colors[0])
+        if urls:
+            return product_colors[0], urls
+
+    return None
+
+
+def photo_urls_for_color(product: dict[str, Any], color_label: str) -> list[str]:
+    """URLs PFS pour une couleur (ou la seule couleur connue), sans agrégat multi-couleurs."""
+    groups = _filter_groups_for_product(product, product_images_by_color(product))
+    if color_label:
+        urls = _urls_for_color_label(groups, color_label)
+        if urls:
+            return urls
+        if len(groups) == 1:
+            return list(groups[0][1])[:MAX_PHOTOS_PER_PRODUCT]
+        return []
+
+    if len(groups) == 1:
+        return list(groups[0][1])[:MAX_PHOTOS_PER_PRODUCT]
+
+    product_colors = _product_color_labels(product)
+    if len(product_colors) == 1:
+        return _urls_for_color_label(groups, product_colors[0])
+    return []
+
+
 def _aggregate_photo_urls(groups: list[tuple[str, list[str]]]) -> list[str]:
     seen: set[str] = set()
     urls: list[str] = []
@@ -285,7 +363,7 @@ def upload_pfs_photos_to_efashion(
         reference = str(product.get("reference") or "").strip()
         if not reference:
             continue
-        groups = product_images_by_color(product)
+        groups = _filter_groups_for_product(product, product_images_by_color(product))
         if not groups:
             errors.append(f"{reference} : aucune photo source.")
             continue
@@ -314,12 +392,29 @@ def upload_pfs_photos_to_efashion(
             errors.append(f"{reference} : fiche EFashion introuvable.")
             continue
 
-        # tailles / une seule fiche : photos sur cette fiche (pas un dump multi-couleurs
-        # sur une « principale » parmi plusieurs fiches couleurs).
-        if single_fiche_id is not None:
+        # tailles : une seule fiche → toutes les photos.
+        if single_fiche_id is not None and vendu_par == "tailles":
             urls = _aggregate_photo_urls(groups)[:MAX_PHOTOS_PER_PRODUCT]
             used_ids.add(single_fiche_id)
             jobs.append((reference, "MAIN", single_fiche_id, urls))
+            continue
+
+        # couleurs : une seule fiche → photos de CETTE couleur seulement.
+        if single_fiche_id is not None and vendu_par == "couleurs":
+            resolved = _resolve_single_couleur_photo_job(product, groups, candidates[0])
+            if resolved is None:
+                errors.append(f"{reference} : fiche unique sans photos pour sa couleur.")
+                continue
+            color_label, urls = resolved
+            used_ids.add(single_fiche_id)
+            jobs.append(
+                (
+                    reference,
+                    color_label,
+                    single_fiche_id,
+                    urls[:MAX_PHOTOS_PER_PRODUCT],
+                )
+            )
             continue
 
         # Mode couleurs : 1 couleur → 1 fiche, photos de CETTE couleur seulement.
