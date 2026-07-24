@@ -94,6 +94,9 @@ def resolve_update_target_path() -> Path | None:
         return home_apps / target_name
 
     if os.access(current.parent, os.W_OK):
+    # Windows onedir
+    parent = current.parent
+    if os.access(parent, os.W_OK):
         return current
     local_apps = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_BUILD_NAME
     local_apps.mkdir(parents=True, exist_ok=True)
@@ -366,6 +369,7 @@ TARGET="$3"
 LOG="$4"
 exec >>"$LOG" 2>&1
 echo "[update] wait pid=$PID staged=$STAGED target=$TARGET"
+# Attendre la fin du process (timeout 120s)
 for i in $(seq 1 300); do
   if ! kill -0 "$PID" 2>/dev/null; then
     break
@@ -383,12 +387,26 @@ esac
 mkdir -p "$(dirname "$TARGET")"
 rm -rf "$TARGET" 2>/dev/null || true
 if [ -e "$TARGET" ]; then
+mkdir -p "$(dirname "$TARGET")"
+# Ne jamais essayer d'écrire dans App Translocation (read-only)
+case "$TARGET" in
+  *AppTranslocation*)
+    echo "[update] ERROR: target is App Translocation (read-only)"
+    TARGET="$HOME/Applications/GestionnaireCatalogue.app"
+    mkdir -p "$(dirname "$TARGET")"
+    echo "[update] fallback target=$TARGET"
+    ;;
+esac
+rm -rf "$TARGET" 2>/dev/null || true
+if [ -e "$TARGET" ]; then
+  echo "[update] rm failed, trying move aside"
   rm -rf "${TARGET}.old" 2>/dev/null || true
   mv "$TARGET" "${TARGET}.old" 2>/dev/null || true
   rm -rf "$TARGET" 2>/dev/null || true
 fi
 if ! mv "$STAGED" "$TARGET"; then
   echo "[update] mv failed, cp -R"
+  echo "[update] mv failed, trying cp -R"
   rm -rf "$TARGET"
   cp -R "$STAGED" "$TARGET"
   rm -rf "$STAGED"
@@ -407,6 +425,9 @@ if ! open "$TARGET"; then
   chmod +x "$BIN" 2>/dev/null || true
   nohup "$BIN" >/dev/null 2>&1 &
 fi
+xattr -cr "$TARGET" 2>/dev/null || true
+echo "[update] launch $TARGET"
+open "$TARGET" || open -n "$TARGET" || /usr/bin/open "$TARGET"
 echo "[update] done"
 """,
         encoding="utf-8",
@@ -448,6 +469,8 @@ def apply_update_and_relaunch(zip_path: Path) -> Path:
     """
     Prépare la nouvelle version et lance un script d'installation détaché.
     Le caller doit quitter immédiatement après (os._exit).
+    Le caller doit quitter l'app immédiatement après (de préférence os._exit).
+    Retourne le chemin d'installation cible.
     """
     install_path = resolve_update_target_path()
     if install_path is None:
@@ -457,6 +480,17 @@ def apply_update_and_relaunch(zip_path: Path) -> Path:
         )
 
     current = current_install_path()
+    if current is not None and _is_app_translocated(current):
+        # Expliquer via le log : on ne peut pas patcher le volume Gatekeeper.
+        UPDATES_DIR.mkdir(parents=True, exist_ok=True)
+        note = UPDATES_DIR / "install.log"
+        note.write_text(
+            f"[update] running from App Translocation ({current}); "
+            f"installing to writable path {install_path}\n",
+            encoding="utf-8",
+        )
+
+    staged = stage_update_from_zip(Path(zip_path))
     UPDATES_DIR.mkdir(parents=True, exist_ok=True)
     log_path = UPDATES_DIR / "install.log"
     if current is not None and _is_app_translocated(current):
@@ -489,6 +523,7 @@ def apply_update_and_relaunch(zip_path: Path) -> Path:
         return install_path
 
     if sys.platform == "win32":
+    elif sys.platform == "win32":
         script = UPDATES_DIR / "install_update.ps1"
         _write_windows_installer(script)
         launch_after = str(Path(install_path) / f"{APP_BUILD_NAME}.exe")
