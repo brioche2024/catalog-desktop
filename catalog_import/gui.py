@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -34,7 +35,9 @@ from .app_update import (
     AppUpdateError,
     apply_update_and_relaunch,
     check_and_download_update,
+    current_install_path,
     is_frozen_app,
+    resolve_update_target_path,
 )
 from .auth import AuthError, login_pfs
 from .category_mapping import (
@@ -1162,6 +1165,19 @@ class CatalogDesktopApp(QMainWindow):
         self._update_prompted_version = version
         self._append_log(f"Nouvelle version {version} téléchargée : {file_path}")
 
+        relocate_note = ""
+        if is_frozen_app():
+            target = resolve_update_target_path()
+            current = current_install_path()
+            if (
+                target is not None
+                and current is not None
+                and target.resolve() != current.resolve()
+            ):
+                relocate_note = (
+                    f"\n\nElle sera installée ici :\n{target}"
+                )
+
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Information)
         box.setWindowTitle("Mise à jour disponible")
@@ -1169,7 +1185,7 @@ class CatalogDesktopApp(QMainWindow):
             f"La version {version} est disponible "
             f"(vous êtes en {APP_VERSION}).\n\n"
             "L’application va se fermer, installer la nouvelle version, "
-            "puis se relancer."
+            f"puis se relancer.{relocate_note}"
         )
         box.setInformativeText(file_path)
         install_btn = box.addButton("Installer et relancer", QMessageBox.AcceptRole)
@@ -1199,7 +1215,9 @@ class CatalogDesktopApp(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
 
-        QApplication.instance().quit()
+        # Quitter immédiatement : sinon le script d'install attend un PID
+        # qui ne meurt jamais (threads Qt encore actifs).
+        os._exit(0)
 
     def _append_log(self, message: str) -> None:
         return

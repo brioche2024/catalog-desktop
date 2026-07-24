@@ -59,7 +59,7 @@ def is_frozen_app() -> bool:
 
 
 def current_install_path() -> Path | None:
-    """Chemin de l'app installée (.app macOS ou dossier onedir Windows)."""
+    """Chemin de l'app actuellement lancée (.app macOS ou dossier onedir Windows)."""
     if not is_frozen_app():
         return None
     exe = Path(sys.executable).resolve()
@@ -69,6 +69,40 @@ def current_install_path() -> Path | None:
                 return parent
         return None
     return exe.parent
+
+
+def _is_app_translocated(path: Path) -> bool:
+    """Gatekeeper macOS exécute les .app non notarisés depuis un volume read-only."""
+    return "AppTranslocation" in str(path)
+
+
+def resolve_update_target_path() -> Path | None:
+    """
+    Destination writable pour installer la nouvelle version.
+    Si l'app tourne sous App Translocation (Downloads, etc.), on installe
+    dans ~/Applications pour pouvoir remplacer et relancer.
+    """
+    current = current_install_path()
+    if current is None:
+        return None
+
+    if sys.platform == "darwin":
+        target_name = f"{APP_BUILD_NAME}.app"
+        if not _is_app_translocated(current):
+            parent = current.parent
+            if os.access(parent, os.W_OK):
+                return current
+        home_apps = Path.home() / "Applications"
+        home_apps.mkdir(parents=True, exist_ok=True)
+        return home_apps / target_name
+
+    # Windows onedir
+    parent = current.parent
+    if os.access(parent, os.W_OK):
+        return current
+    local_apps = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_BUILD_NAME
+    local_apps.mkdir(parents=True, exist_ok=True)
+    return local_apps
 
 
 def _platform_asset_markers() -> tuple[str, ...]:
@@ -301,22 +335,47 @@ def stage_update_from_zip(zip_path: Path) -> Path:
 def _write_macos_installer(script_path: Path) -> None:
     script_path.write_text(
         """#!/bin/bash
-set -e
 PID="$1"
 STAGED="$2"
 TARGET="$3"
 LOG="$4"
 exec >>"$LOG" 2>&1
-echo "[update] wait pid=$PID"
-while kill -0 "$PID" 2>/dev/null; do sleep 0.4; done
+echo "[update] wait pid=$PID staged=$STAGED target=$TARGET"
+# Attendre la fin du process (timeout 120s)
+for i in $(seq 1 300); do
+  if ! kill -0 "$PID" 2>/dev/null; then
+    break
+  fi
+  sleep 0.4
+done
 sleep 1
-echo "[update] replace $TARGET"
-rm -rf "$TARGET"
+echo "[update] replace -> $TARGET"
 mkdir -p "$(dirname "$TARGET")"
-mv "$STAGED" "$TARGET"
+# Ne jamais essayer d'écrire dans App Translocation (read-only)
+case "$TARGET" in
+  *AppTranslocation*)
+    echo "[update] ERROR: target is App Translocation (read-only)"
+    TARGET="$HOME/Applications/GestionnaireCatalogue.app"
+    mkdir -p "$(dirname "$TARGET")"
+    echo "[update] fallback target=$TARGET"
+    ;;
+esac
+rm -rf "$TARGET" 2>/dev/null || true
+if [ -e "$TARGET" ]; then
+  echo "[update] rm failed, trying move aside"
+  rm -rf "${TARGET}.old" 2>/dev/null || true
+  mv "$TARGET" "${TARGET}.old" 2>/dev/null || true
+  rm -rf "$TARGET" 2>/dev/null || true
+fi
+if ! mv "$STAGED" "$TARGET"; then
+  echo "[update] mv failed, trying cp -R"
+  rm -rf "$TARGET"
+  cp -R "$STAGED" "$TARGET"
+  rm -rf "$STAGED"
+fi
 xattr -cr "$TARGET" 2>/dev/null || true
-echo "[update] launch"
-open "$TARGET"
+echo "[update] launch $TARGET"
+open "$TARGET" || open -n "$TARGET" || /usr/bin/open "$TARGET"
 echo "[update] done"
 """,
         encoding="utf-8",
@@ -351,16 +410,28 @@ Write-Log "done"
     )
 
 
-def apply_update_and_relaunch(zip_path: Path) -> None:
+def apply_update_and_relaunch(zip_path: Path) -> Path:
     """
     Prépare la nouvelle version et lance un script d'installation détaché.
-    Le caller doit quitter l'app immédiatement après.
+    Le caller doit quitter l'app immédiatement après (de préférence os._exit).
+    Retourne le chemin d'installation cible.
     """
-    install_path = current_install_path()
+    install_path = resolve_update_target_path()
     if install_path is None:
         raise AppUpdateError(
             "Installation auto disponible uniquement depuis l’application empaquetée "
             "(.app / .exe), pas en mode développement."
+        )
+
+    current = current_install_path()
+    if current is not None and _is_app_translocated(current):
+        # Expliquer via le log : on ne peut pas patcher le volume Gatekeeper.
+        UPDATES_DIR.mkdir(parents=True, exist_ok=True)
+        note = UPDATES_DIR / "install.log"
+        note.write_text(
+            f"[update] running from App Translocation ({current}); "
+            f"installing to writable path {install_path}\n",
+            encoding="utf-8",
         )
 
     staged = stage_update_from_zip(Path(zip_path))
@@ -383,7 +454,9 @@ def apply_update_and_relaunch(zip_path: Path) -> None:
             start_new_session=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            close_fds=True,
         )
+        return install_path
     elif sys.platform == "win32":
         script = UPDATES_DIR / "install_update.ps1"
         _write_windows_installer(script)
@@ -416,5 +489,5 @@ def apply_update_and_relaunch(zip_path: Path) -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-    else:
-        raise AppUpdateError("Plateforme non supportée pour l’install auto.")
+        return install_path
+    raise AppUpdateError("Plateforme non supportée pour l’install auto.")
