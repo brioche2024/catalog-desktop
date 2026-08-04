@@ -13,6 +13,9 @@ class EfashionApiError(Exception):
     pass
 
 
+EFASHION_BULK_BATCH_SIZE = 100
+
+
 def _auth_headers(session: EfashionSession, *, json_content: bool = True) -> dict[str, str]:
     headers = {
         "User-Agent": USER_AGENT,
@@ -340,14 +343,20 @@ class EfashionClient:
           publishBrouillonBulk(id_produits: $id_produits, id_vendeur: $id_vendeur)
         }
         """
-        data = self.graphql(
-            mutation,
-            {
-                "id_produits": [int(pid) for pid in product_ids],
-                "id_vendeur": int(self.session.id_vendeur),
-            },
-        )
-        return int(data.get("publishBrouillonBulk") or 0)
+        total = 0
+        unique_ids = sorted({int(pid) for pid in product_ids})
+        for offset in range(0, len(unique_ids), EFASHION_BULK_BATCH_SIZE):
+            data = self.graphql(
+                mutation,
+                {
+                    "id_produits": unique_ids[
+                        offset : offset + EFASHION_BULK_BATCH_SIZE
+                    ],
+                    "id_vendeur": int(self.session.id_vendeur),
+                },
+            )
+            total += int(data.get("publishBrouillonBulk") or 0)
+        return total
 
     def soft_delete_produits(self, product_ids: list[int]) -> bool:
         """Soft-delete EFashion (supprimer=1), comme le back-office vendeur."""
@@ -860,4 +869,3 @@ class EfashionClient:
         if not isinstance(body, dict):
             raise EfashionApiError("Réponse upload photo inattendue.")
         return body
-

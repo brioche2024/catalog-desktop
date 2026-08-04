@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import unicodedata
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Qt, QUrl
@@ -10,7 +11,6 @@ from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequ
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFrame,
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -44,7 +45,6 @@ from .category_mapping import (
     CategoryMappingEntry,
     CategoryMappingStore,
     category_options_from_reference,
-    children_of,
     pfs_category_label,
 )
 from .config import (
@@ -82,7 +82,7 @@ class ClickableLabel(QLabel):
 
 
 class CategoryMappingDialog(QDialog):
-    """Popup L1 → L2 → L3 pour une catégorie source inconnue."""
+    """Recherche d'une feuille EFashion pour une catégorie source inconnue."""
 
     def __init__(
         self,
@@ -98,7 +98,7 @@ class CategoryMappingDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Mapping catégorie EFashion")
-        self.setMinimumWidth(460)
+        self.setMinimumSize(700, 500)
         self.mapping_key = mapping_key
         self.pfs_label = pfs_label
         self.gender = gender
@@ -114,38 +114,40 @@ class CategoryMappingDialog(QDialog):
             f"Catégorie source « {pfs_label} »"
             + (f" ({gender})" if gender and gender != "*" else "")
             + "\nn’a pas encore de feuille EFashion associée.\n"
-            "Choisissez la catégorie L1 → L2 → L3."
+            "Recherchez une catégorie EFashion puis sélectionnez le chemin correspondant."
         )
         info.setWordWrap(True)
         layout.addWidget(info)
 
-        self.l1_combo = QComboBox()
-        self.l2_combo = QComboBox()
-        self.l3_combo = QComboBox()
-        for combo, title in (
-            (self.l1_combo, "Catégorie (L1)"),
-            (self.l2_combo, "Sous-catégorie (L2)"),
-            (self.l3_combo, "Feuille (L3)"),
-        ):
-            layout.addWidget(QLabel(title))
-            layout.addWidget(combo)
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText(
+            "Filtrer par nom, ex. robe, maille, baskets…"
+        )
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.textChanged.connect(self._apply_filter)
+        layout.addWidget(self.search_input)
 
-        self.l1_combo.addItem("— Choisir —", "")
-        for item in sorted(self._l1, key=lambda x: str(x.get("label") or "")):
-            self.l1_combo.addItem(str(item.get("label") or item["id"]), str(item["id"]))
+        self.results_label = QLabel()
+        self.results_label.setStyleSheet("color: #6b7280;")
+        layout.addWidget(self.results_label)
 
-        self.l1_combo.currentIndexChanged.connect(self._on_l1_changed)
-        self.l2_combo.currentIndexChanged.connect(self._on_l2_changed)
-        self._on_l1_changed()
+        self.results_table = QTableWidget(0, 1)
+        self.results_table.setHorizontalHeaderLabels(
+            ["Chemin de la catégorie EFashion"]
+        )
+        self.results_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.Stretch
+        )
+        self.results_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.results_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.results_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.results_table.verticalHeader().setVisible(False)
+        self.results_table.cellDoubleClicked.connect(lambda *_: self._on_accept())
+        layout.addWidget(self.results_table)
 
-        if initial_entry and initial_entry.l1_id:
-            self._select_combo_data(self.l1_combo, initial_entry.l1_id)
-            self._on_l1_changed()
-            if initial_entry.l2_id:
-                self._select_combo_data(self.l2_combo, initial_entry.l2_id)
-                self._on_l2_changed()
-                if initial_entry.id:
-                    self._select_combo_data(self.l3_combo, initial_entry.id)
+        self._paths = self._build_paths()
+        self._selected_id = initial_entry.id if initial_entry else ""
+        self._apply_filter()
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._on_accept)
@@ -153,63 +155,73 @@ class CategoryMappingDialog(QDialog):
         layout.addWidget(buttons)
 
     @staticmethod
-    def _select_combo_data(combo: QComboBox, value: str) -> None:
-        index = combo.findData(str(value))
-        if index >= 0:
-            combo.setCurrentIndex(index)
+    def _normalized(value: str) -> str:
+        return "".join(
+            char
+            for char in unicodedata.normalize("NFD", value.lower())
+            if unicodedata.category(char) != "Mn"
+        )
 
-    def _on_l1_changed(self) -> None:
-        self.l2_combo.blockSignals(True)
-        self.l2_combo.clear()
-        self.l2_combo.addItem("— Choisir —", "")
-        parent_id = str(self.l1_combo.currentData() or "")
-        if parent_id:
-            for item in sorted(
-                children_of(self._l2, parent_id),
-                key=lambda x: str(x.get("label") or ""),
-            ):
-                self.l2_combo.addItem(
-                    str(item.get("label") or item["id"]), str(item["id"])
-                )
-        self.l2_combo.blockSignals(False)
-        self._on_l2_changed()
+    def _build_paths(self) -> list[dict[str, str]]:
+        l1_by_id = {str(item["id"]): item for item in self._l1}
+        l2_by_id = {str(item["id"]): item for item in self._l2}
+        paths: list[dict[str, str]] = []
+        for leaf in self._l3:
+            l2 = l2_by_id.get(str(leaf.get("parentId") or ""))
+            l1 = l1_by_id.get(str((l2 or {}).get("parentId") or ""))
+            labels = [
+                str((l1 or {}).get("label") or (l1 or {}).get("id") or ""),
+                str((l2 or {}).get("label") or (l2 or {}).get("id") or ""),
+                str(leaf.get("label") or leaf.get("id") or ""),
+            ]
+            label = " > ".join(part for part in labels if part)
+            paths.append(
+                {
+                    "id": str(leaf["id"]),
+                    "label": label,
+                    "l1_id": str((l1 or {}).get("id") or ""),
+                    "l2_id": str((l2 or {}).get("id") or ""),
+                }
+            )
+        return sorted(paths, key=lambda item: self._normalized(item["label"]))
 
-    def _on_l2_changed(self) -> None:
-        self.l3_combo.clear()
-        self.l3_combo.addItem("— Choisir —", "")
-        parent_id = str(self.l2_combo.currentData() or "")
-        if parent_id:
-            for item in sorted(
-                children_of(self._l3, parent_id),
-                key=lambda x: str(x.get("label") or ""),
-            ):
-                self.l3_combo.addItem(
-                    str(item.get("label") or item["id"]), str(item["id"])
-                )
+    def _apply_filter(self) -> None:
+        terms = self._normalized(self.search_input.text()).split()
+        matches = [
+            path
+            for path in self._paths
+            if all(term in self._normalized(path["label"]) for term in terms)
+        ]
+        self.results_table.setRowCount(len(matches))
+        self.results_label.setText(f"{len(matches)} catégorie(s) trouvée(s)")
+        selected_row = -1
+        for row, path in enumerate(matches):
+            item = QTableWidgetItem(path["label"])
+            item.setData(Qt.UserRole, path)
+            self.results_table.setItem(row, 0, item)
+            if path["id"] == self._selected_id:
+                selected_row = row
+        if selected_row >= 0:
+            self.results_table.selectRow(selected_row)
+        elif matches:
+            self.results_table.selectRow(0)
 
     def _on_accept(self) -> None:
-        l1_id = str(self.l1_combo.currentData() or "")
-        l2_id = str(self.l2_combo.currentData() or "")
-        l3_id = str(self.l3_combo.currentData() or "")
-        if not l1_id or not l2_id or not l3_id:
+        row = self.results_table.currentRow()
+        item = self.results_table.item(row, 0) if row >= 0 else None
+        path = item.data(Qt.UserRole) if item else None
+        if not isinstance(path, dict) or not path.get("id"):
             QMessageBox.warning(
                 self,
                 APP_NAME,
-                "Sélectionnez une catégorie complète (L1, L2 et L3).",
+                "Recherchez puis sélectionnez une catégorie EFashion.",
             )
             return
-        label = " > ".join(
-            [
-                self.l1_combo.currentText(),
-                self.l2_combo.currentText(),
-                self.l3_combo.currentText(),
-            ]
-        )
         self.selected_entry = CategoryMappingEntry(
-            id=l3_id,
-            label=label,
-            l1_id=l1_id,
-            l2_id=l2_id,
+            id=str(path["id"]),
+            label=str(path["label"]),
+            l1_id=str(path.get("l1_id") or ""),
+            l2_id=str(path.get("l2_id") or ""),
             pfs_category=self.pfs_label,
             gender=self.gender,
         )
@@ -610,6 +622,7 @@ class CatalogDesktopApp(QMainWindow):
         self.selected_update_ids: set[str] = set()
         self.existing_references: set[str] = set()
         self._pending_existing_check = False
+        self._pending_auto_fetch = False
         self._existing_refs_verified = False
         self._busy = False
         self._thread: QThread | None = None
@@ -1002,6 +1015,7 @@ class CatalogDesktopApp(QMainWindow):
         create_label = QLabel("À créer sur le catalogue")
         create_label.setStyleSheet("color: #111827; font-weight: 700;")
         layout.addWidget(create_label)
+        layout.addLayout(self._build_range_selector("create"))
 
         self.products_table = self._make_products_table(
             select_all_attr="select_all_checkbox",
@@ -1014,6 +1028,7 @@ class CatalogDesktopApp(QMainWindow):
         existing_label = QLabel("Déjà en ligne — mise à jour")
         existing_label.setStyleSheet("color: #b45309; font-weight: 700;")
         layout.addWidget(existing_label)
+        layout.addLayout(self._build_range_selector("update"))
 
         self.existing_table = self._make_products_table(
             select_all_attr="select_all_update_checkbox",
@@ -1067,6 +1082,66 @@ class CatalogDesktopApp(QMainWindow):
 
         return page
 
+    def _build_range_selector(self, target: str) -> QHBoxLayout:
+        """Contrôle de sélection inclusif, basé sur les lignes actuellement visibles."""
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        label = QLabel("Cocher les lignes visibles de")
+        label.setStyleSheet("color: #374151;")
+        row.addWidget(label)
+
+        start = QSpinBox()
+        end = QSpinBox()
+        for spin in (start, end):
+            spin.setRange(1, 1)
+            spin.setFixedWidth(78)
+            row.addWidget(spin)
+        row.insertWidget(2, QLabel("à"))
+
+        button = QPushButton("Cocher la plage")
+        button.setProperty("class", "secondary")
+        button.clicked.connect(lambda: self._on_select_range(target))
+        row.addWidget(button)
+        row.addStretch()
+
+        setattr(self, f"{target}_range_start", start)
+        setattr(self, f"{target}_range_end", end)
+        setattr(self, f"{target}_range_button", button)
+        return row
+
+    def _refresh_range_selector(self, target: str, count: int) -> None:
+        start = getattr(self, f"{target}_range_start")
+        end = getattr(self, f"{target}_range_end")
+        button = getattr(self, f"{target}_range_button")
+        enabled = bool(count) and not self._selection_locked()
+        for spin in (start, end):
+            spin.blockSignals(True)
+            spin.setRange(1, max(count, 1))
+            spin.setValue(min(spin.value(), max(count, 1)))
+            spin.setEnabled(enabled)
+            spin.blockSignals(False)
+        button.setEnabled(enabled)
+
+    def _on_select_range(self, target: str) -> None:
+        if self._selection_locked():
+            return
+        products = (
+            self.displayed_create_products
+            if target == "create"
+            else self.displayed_existing_products
+        )
+        selected = self.selected_ids if target == "create" else self.selected_update_ids
+        start = getattr(self, f"{target}_range_start").value()
+        end = getattr(self, f"{target}_range_end").value()
+        first, last = sorted((start, end))
+        selected.update(
+            self._product_key(product)
+            for product in products[first - 1 : last]
+            if self._product_key(product)
+        )
+        self._apply_reference_filter()
+        self._update_selection_status()
+
     def _is_setup_complete(self) -> bool:
         if not self.app_session or not self.app_session.pfs:
             return False
@@ -1095,12 +1170,17 @@ class CatalogDesktopApp(QMainWindow):
 
     def _auto_fetch_products_if_needed(self) -> None:
         if self.products:
+            self._pending_auto_fetch = False
             return
         if self._thread and self._thread.isRunning():
+            # Lors de la première connexion EFashion, le signal de succès arrive
+            # avant l'arrêt du thread. Garder la demande pour la fin du login.
+            self._pending_auto_fetch = True
             return
         if not self.app_session or not self.app_session.pfs:
             return
 
+        self._pending_auto_fetch = False
         self.summary_label.setText("Récupération de vos produits…")
         self.progress_bar.setValue(0)
         self._append_log(
@@ -1307,6 +1387,9 @@ class CatalogDesktopApp(QMainWindow):
             finished_task = self._pending_task
             self._pending_task = ""
             self._set_busy(False)
+            if self._pending_auto_fetch and not self.products:
+                QTimer.singleShot(0, self._auto_fetch_products_if_needed)
+                return
             # Enchaîner la vérif doublons SEULEMENT après arrêt complet du thread
             if (
                 self._pending_existing_check
@@ -1414,6 +1497,7 @@ class CatalogDesktopApp(QMainWindow):
         self.existing_references = set()
         self._existing_refs_verified = False
         self._pending_existing_check = False
+        self._pending_auto_fetch = False
         self.pfs_password_input.clear()
         self.efashion_password_input.clear()
         if hasattr(self, "reference_filter_input"):
@@ -1876,6 +1960,8 @@ class CatalogDesktopApp(QMainWindow):
                 allow_edit_reference=False,
                 select_all_checkbox=getattr(self, "select_all_update_checkbox", None),
             )
+        self._refresh_range_selector("create", len(create_list))
+        self._refresh_range_selector("update", len(existing_list))
         self._update_selection_status()
 
     def _on_reference_filter_changed(self, _text: str) -> None:
@@ -2190,7 +2276,7 @@ class CatalogDesktopApp(QMainWindow):
         self._start_worker(worker)
 
     def _ensure_category_mappings(self, products: list[dict]) -> bool:
-        """Popup L1→L2→L3 pour les catégories source encore inconnues."""
+        """Demande les correspondances de catégories source encore inconnues."""
         assert self.app_session and self.app_session.efashion
         store = CategoryMappingStore(
             id_vendeur=self.app_session.efashion.id_vendeur

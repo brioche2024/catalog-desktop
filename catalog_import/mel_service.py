@@ -26,6 +26,9 @@ from .session_store import EfashionSession, PfsSession
 from .stock_sync import apply_rupture_stocks_after_publish
 
 
+SEND_BATCH_SIZE = 100
+
+
 class MelSyncError(Exception):
     pass
 
@@ -453,19 +456,38 @@ def send_products_to_efashion(
                 kind = classify_pfs_product(product)
                 counts[kind] = counts.get(kind, 0) + 1
 
-            progress(3, "Création des fiches MEL (étape brouillon)…")
-            draft_result = client.save_mel_draft(mel_references)
-            created = int(draft_result.get("totalProducts") or 0)
+            # Les endpoints MEL reçoivent un payload très volumineux par produit.
+            # Limiter les mutations à 100 références évite les erreurs serveur
+            # lorsqu'un vendeur sélectionne plusieurs centaines de produits.
+            created = 0
+            shooting_ids: list[int] = []
+            batch_count = (
+                len(mel_references) + SEND_BATCH_SIZE - 1
+            ) // SEND_BATCH_SIZE
+            for offset in range(0, len(mel_references), SEND_BATCH_SIZE):
+                batch_number = offset // SEND_BATCH_SIZE + 1
+                references_batch = mel_references[offset : offset + SEND_BATCH_SIZE]
+                progress(
+                    3,
+                    "Création des fiches MEL (brouillon) — "
+                    f"lot {batch_number}/{batch_count} "
+                    f"({len(references_batch)} produit(s))…",
+                )
+                draft_result = client.save_mel_draft(references_batch)
+                created += int(draft_result.get("totalProducts") or 0)
 
-            progress(4, "Passage en MEL UPGR (gestion upload photo)…")
-            choice_result = client.save_mel_choice_upload(mel_references)
-
-            shootings = choice_result.get("shootings") or []
-            shooting_ids = [
-                int(item["id"])
-                for item in shootings
-                if isinstance(item, dict) and item.get("id") is not None
-            ]
+                progress(
+                    4,
+                    "Préparation de l'upload photos — "
+                    f"lot {batch_number}/{batch_count}…",
+                )
+                choice_result = client.save_mel_choice_upload(references_batch)
+                shootings = choice_result.get("shootings") or []
+                shooting_ids.extend(
+                    int(item["id"])
+                    for item in shootings
+                    if isinstance(item, dict) and item.get("id") is not None
+                )
 
             photo_result: dict[str, object] = {
                 "uploaded_products": 0,
