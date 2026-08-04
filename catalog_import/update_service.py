@@ -298,6 +298,11 @@ def _create_product_full(
             client, [product], shooting_ids
         )
         errors.extend(list(photo_result.get("errors") or []))
+        photo_ready_references = {
+            str(item).strip()
+            for item in (photo_result.get("photo_ready_references") or [])
+            if str(item).strip()
+        }
         ef_products = fetch_upload_products_for_shootings(client, shooting_ids)
         ids = [
             int(item["id"])
@@ -309,13 +314,22 @@ def _create_product_full(
                 or str(item.get("referenceBase") or "") == reference
             )
         ]
-        if ids and classify_pfs_product(product) != "draft":
+        if (
+            ids
+            and classify_pfs_product(product) != "draft"
+            and reference in photo_ready_references
+        ):
             try:
                 offline = classify_pfs_product(product) == "disabled"
                 client.publish_brouillon_bulk(ids)
                 client.set_produits_visible(ids, visible=not offline)
             except EfashionApiError as exc:
                 errors.append(f"{reference} publish : {exc}")
+        elif ids and classify_pfs_product(product) != "draft":
+            errors.append(
+                f"{reference} : fiche créée mais laissée en brouillon "
+                "car la photo n'a pas été validée."
+            )
     notes.append(f"{reference} : fiche créée (absente du catalogue)")
 
 

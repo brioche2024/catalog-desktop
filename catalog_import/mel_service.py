@@ -295,11 +295,12 @@ def _finalize_products_after_photos(
     products: list[dict],
     mel_references: list[dict],
     shooting_ids: list[int],
+    photo_ready_references: set[str],
 ) -> tuple[int, int, int, list[str]]:
     """
     Finalise les fiches EFashion :
     - NEW → reste brouillon
-    - READY_FOR_SALE → publish ; Visible par couleur (is_active=false → décoché)
+    - READY_FOR_SALE → publish seulement si toutes ses fiches ont une photo validée
     - ARCHIVED → publish puis Visible décoché sur tout le groupe
     """
     if not products or not shooting_ids:
@@ -308,6 +309,7 @@ def _finalize_products_after_photos(
     active_products: list[dict] = []
     draft_products: list[dict] = []
     disabled_products: list[dict] = []
+    errors: list[str] = []
 
     for product in products:
         reference = _product_reference(product)
@@ -318,11 +320,16 @@ def _finalize_products_after_photos(
             disabled_products.append(product)
         elif kind == "draft":
             draft_products.append(product)
-        else:
+        elif reference in photo_ready_references:
             active_products.append(product)
+        else:
+            errors.append(
+                f"{reference} : non mis en ligne car au moins une fiche "
+                "n'a pas de photo validée."
+            )
 
     if not active_products and not draft_products and not disabled_products:
-        return 0, 0, 0, []
+        return 0, 0, 0, errors
 
     active_refs = {_product_reference(p) for p in active_products}
     disabled_refs = {_product_reference(p) for p in disabled_products}
@@ -338,7 +345,6 @@ def _finalize_products_after_photos(
         ef_products,
     )
 
-    errors: list[str] = []
     published_online = 0
     published_offline = 0
     draft_count = len(draft_refs)
@@ -493,6 +499,7 @@ def send_products_to_efashion(
                 "uploaded_products": 0,
                 "uploaded_photos": 0,
                 "errors": [],
+                "photo_ready_references": [],
             }
             if shooting_ids:
                 progress(5, "Upload photos → S3 EFashion (resize serveur)…")
@@ -529,6 +536,13 @@ def send_products_to_efashion(
                         products_for_photos,
                         mel_references,
                         shooting_ids,
+                        {
+                            str(reference).strip()
+                            for reference in (
+                                photo_result.get("photo_ready_references") or []
+                            )
+                            if str(reference).strip()
+                        },
                     )
                 )
 
@@ -545,7 +559,7 @@ def send_products_to_efashion(
             ]
             if counts["active"]:
                 message_parts.append(
-                    f"{published_online or counts['active']} fiche(s) actives "
+                    f"{published_online} fiche(s) actives "
                     f"mise(s) en ligne."
                 )
             if counts["draft"]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from time import sleep
 from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
 
@@ -13,6 +14,7 @@ from .pfs_client import product_images_by_color, resolve_efashion_vendu_par
 
 MAX_PHOTOS_PER_REQUEST = 10
 MAX_PHOTOS_PER_PRODUCT = 20
+PHOTO_UPLOAD_MAX_ATTEMPTS = 3
 
 
 def _normalize(text: str) -> str:
@@ -339,6 +341,26 @@ def _urls_for_color_label(
     return []
 
 
+def _upload_chunk_with_retry(
+    client: EfashionClient,
+    product_id: int,
+    files: list[tuple[str, bytes, str]],
+) -> None:
+    """Réessaie un upload S3 transitoire avant de laisser la fiche en brouillon."""
+    last_error: Exception | None = None
+    for attempt in range(1, PHOTO_UPLOAD_MAX_ATTEMPTS + 1):
+        try:
+            client.upload_product_photos(product_id, files)
+            return
+        except Exception as exc:  # Réseau / API : l'erreur finale est remontée au produit.
+            last_error = exc
+            if attempt < PHOTO_UPLOAD_MAX_ATTEMPTS:
+                sleep(attempt)
+    raise EfashionApiError(
+        f"upload échoué après {PHOTO_UPLOAD_MAX_ATTEMPTS} tentatives : {last_error}"
+    )
+
+
 def upload_pfs_photos_to_efashion(
     client: EfashionClient,
     pfs_products: list[dict[str, Any]],
@@ -352,17 +374,24 @@ def upload_pfs_photos_to_efashion(
             "uploaded_products": 0,
             "uploaded_photos": 0,
             "errors": ["Aucun produit UPGR trouvé pour y rattacher les photos."],
+            "photo_ready_references": [],
         }
 
     jobs: list[tuple[str, str, int, list[str]]] = []
     unmatched: list[tuple[str, str, list[str]]] = []
     errors: list[str] = []
     used_ids: set[int] = set()
+    expected_ids_by_reference: dict[str, set[int]] = {}
 
     for product in pfs_products:
         reference = str(product.get("reference") or "").strip()
         if not reference:
             continue
+        expected_ids_by_reference.setdefault(reference, set()).update(
+            int(item["id"])
+            for item in _efashion_candidates_for_reference(ef_products, reference)
+            if item.get("id") is not None
+        )
         groups = _filter_groups_for_product(product, product_images_by_color(product))
         if not groups:
             errors.append(f"{reference} : aucune photo source.")
@@ -466,6 +495,7 @@ def upload_pfs_photos_to_efashion(
     total_jobs = max(len(jobs), 1)
     uploaded_products = 0
     uploaded_photos = 0
+    photo_attached_ids: set[int] = set()
 
     for index, (reference, color_label, product_id, urls) in enumerate(jobs, start=1):
         if on_progress:
@@ -491,14 +521,28 @@ def upload_pfs_photos_to_efashion(
         try:
             for offset in range(0, len(files), MAX_PHOTOS_PER_REQUEST):
                 chunk = files[offset : offset + MAX_PHOTOS_PER_REQUEST]
-                client.upload_product_photos(product_id, chunk)
+                _upload_chunk_with_retry(client, product_id, chunk)
                 uploaded_photos += len(chunk)
+                # Une seule photo validée suffit pour autoriser cette fiche.
+                photo_attached_ids.add(product_id)
             uploaded_products += 1
         except EfashionApiError as exc:
             errors.append(f"{reference}/{color_label} : upload échoué ({exc})")
+
+    photo_ready_references: list[str] = []
+    for reference, expected_ids in expected_ids_by_reference.items():
+        missing_ids = expected_ids - photo_attached_ids
+        if expected_ids and not missing_ids:
+            photo_ready_references.append(reference)
+        elif missing_ids:
+            errors.append(
+                f"{reference} : {len(missing_ids)} fiche(s) sans photo validée "
+                "— laissée(s) en brouillon."
+            )
 
     return {
         "uploaded_products": uploaded_products,
         "uploaded_photos": uploaded_photos,
         "errors": errors,
+        "photo_ready_references": photo_ready_references,
     }
